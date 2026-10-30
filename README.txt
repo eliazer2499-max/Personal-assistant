@@ -15,10 +15,17 @@ NEW IN 2.1
 - Helpers: a big job can split into up to 4 helper jobs that work in
   parallel; you see them under the job card.
 - Settings → General → "Jobs at the same time" (default 3).
-- Settings → Updates → Update source: the default site, or your own GitHub
-  repo (see GITHUB.md).
+- Settings → Updates → Update source: updates.personalassistance.soft-tech.net
+  first, then the repo's /docs on GitHub, then the release site (see RELEASING.md).
 - Before the database changes for 2.1, a full copy is saved in
   /var/lib/myassistant/backups/pre-2.1.0-<time>.db (kept, never auto-deleted).
+
+2.3.1
+- Each AI key has "Use for" (Chat, Coding, Pictures, Voice & files, Background):
+  Settings → Brain (AI keys) → tap a key. Busy or missing → the next active key.
+- New Settings and Brain screens, light and dark (Settings → General → Appearance).
+- The assistant can send you files (send_file) in the web chat and on WhatsApp.
+- It reads Word, Excel, PowerPoint, CSV, text/code files and .zip you send it.
 
 WHAT IT DOES
 - Chat with it on its private web page (installable on your phone's home

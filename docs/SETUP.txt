@@ -9,7 +9,8 @@ Also fine: Google Cloud, AWS, Hetzner, DigitalOcean, or a PC at home*.
 
 2. Paste this one line and press Enter:
 
-   curl -fsSL https://abish-assistant-v2.sites.tab.bot/install.sh | sudo bash
+   curl -fsSL https://updates.personalassistance.soft-tech.net/install.sh | sudo bash
+   (if that address is not up yet: curl -fsSL https://abish-assistant-v2.sites.tab.bot/install.sh | sudo bash)
 
    It takes 3-6 minutes. At the end it prints your private address
    (like https://129-146-10-20.sslip.io) and a SETUP CODE.
@@ -31,6 +32,9 @@ Also fine: Google Cloud, AWS, Hetzner, DigitalOcean, or a PC at home*.
    Then tap "Add Google account" once for each Gmail account.
 
 6. Optional, any time (Settings > Channels):
+   - WhatsApp Agent (2.2): in WhatsApp, Settings > Agents > Create an agent;
+     open the agent's chat > Chat info > API key; paste it in the WhatsApp
+     Agent card, Save key, turn on Enabled, then send the agent a message.
    - Telegram: paste a @BotFather token, tap the pairing link. (Easiest.)
    - Email: switch on, then email yourself with subject "AI: ...".
    - Text/SMS: install "SMS Gateway for Android" on a spare Android

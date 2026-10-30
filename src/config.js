@@ -19,6 +19,11 @@ export const cfg = {
   sandboxUser: env.MA_SANDBOX_USER === undefined ? 'ma-run' : env.MA_SANDBOX_USER,
   updateUnit: env.MA_UPDATE_UNIT || 'myassistant-update.service',
   releaseBase: (env.MA_RELEASE_BASE || 'https://abish-assistant-v2.sites.tab.bot').replace(/\/+$/, ''),
+  // 2.3.1: where updates come from, in order: his own address (GitHub Pages from the repo's /docs), the same folder
+  // on raw.githubusercontent.com, then the release site above. Tests never reach the internet: in test mode only the release base.
+  updateSource: env.MA_UPDATE_SOURCE || (env.MA_TEST_MODE === '1' ? (env.MA_RELEASE_BASE || '').replace(/\/+$/, '') : 'https://updates.personalassistance.soft-tech.net'),
+  updateFallbacks: env.MA_UPDATE_FALLBACKS !== undefined ? env.MA_UPDATE_FALLBACKS.split(',').map(s => s.trim()).filter(Boolean)
+    : (env.MA_TEST_MODE === '1' ? [] : ['https://raw.githubusercontent.com/eliazer2499-max/Personal-assistant/main/docs']),
   testMode: env.MA_TEST_MODE === '1',
   mockModule: env.MA_MOCK_MODULE || '',
   googleBase: env.MA_GOOGLE_BASE || '',     // test override for all Google endpoints

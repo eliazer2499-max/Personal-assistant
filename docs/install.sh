@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 # My Assistant v2 — one-command installer / updater for Ubuntu 22.04/24.04 and Debian 12 (arm64 + amd64).
-#   curl -fsSL https://abish-assistant-v2.sites.tab.bot/install.sh | sudo bash
+#   curl -fsSL https://updates.personalassistance.soft-tech.net/install.sh | sudo bash
+#   (or the same from https://abish-assistant-v2.sites.tab.bot/install.sh)
 # Options (environment variables):
 #   MA_DOMAIN=ai.example.com   use your own domain instead of <ip>.sslip.io (point its A record here first)
 #   MA_EXTRA_DOMAINS=a.com,b.com  also answer on these addresses (point their A records here); kept on re-run/update
 #   MA_EMAIL=you@example.com   email for the HTTPS certificate (optional)
-#   MA_RELEASE_BASE=https://…  where to download the release from
+#   MA_UPDATE_SOURCE=https://… where to download from first (default https://updates.personalassistance.soft-tech.net);
+#                              if it fails: https://raw.githubusercontent.com/eliazer2499-max/Personal-assistant/main/docs, then the release site
+#   MA_RELEASE_BASE=https://…  the release site, the last fallback (given explicitly = download from it directly)
 #   DRY_RUN=1                  print what would be done, change nothing (MA_RENDER_DIR=/tmp/x also writes the files there to inspect)
 #   MA_UPDATE=1                update the app only (keeps data, settings, domain)
 # Safe to run again: it keeps your data, keys and settings.
 set -Eeuo pipefail
 
+RELEASE_BASE_GIVEN="${MA_RELEASE_BASE:-}"
 RELEASE_BASE="${MA_RELEASE_BASE:-https://abish-assistant-v2.sites.tab.bot}"
+UPDATE_SOURCE="${MA_UPDATE_SOURCE:-https://updates.personalassistance.soft-tech.net}"
+GITHUB_DOCS="https://raw.githubusercontent.com/eliazer2499-max/Personal-assistant/main/docs"
+# the release site kept in /etc/myassistant/env as the last fallback (an update that came from one of the first two sources keeps it)
+ENV_RELEASE_BASE="$RELEASE_BASE"
+case "${RELEASE_BASE%/}" in "${UPDATE_SOURCE%/}"|"$GITHUB_DOCS"|https://updates.personalassistance.soft-tech.net) ENV_RELEASE_BASE="https://abish-assistant-v2.sites.tab.bot";; esac
 APP_USER=myassistant
 RUN_USER=ma-run
 WORK_GROUP=ma-work
@@ -95,20 +104,30 @@ run install -d -m 750 -o "$RUN_USER" -g "$RUN_USER" "$SRV/sandbox-home"
 run install -d -m 755 -o "$APP_USER" -g "$APP_USER" "$SRV/sites"
 
 # ---------- download the release ----------
-say "Downloading the app from $RELEASE_BASE"
 TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
+# 2.3.1: sources in order — his own address, the repo's /docs on GitHub, then the release site. Each has
+# version.json + myassistant-latest.tar.gz (+ .sha256). A source that fails is skipped; a sha256 mismatch stops.
+if [ -n "$RELEASE_BASE_GIVEN" ]; then SOURCES="$RELEASE_BASE"; else SOURCES="${UPDATE_SOURCE%/} $GITHUB_DOCS $RELEASE_BASE"; fi
 if [ "$DRY" = 1 ]; then
-  echo "[dry-run] download $RELEASE_BASE/myassistant-latest.tar.gz (+ .sha256) and unpack to $OPT/releases/<version>"
+  for b in $SOURCES; do echo "[dry-run] try $b/version.json + $b/myassistant-latest.tar.gz (+ .sha256)"; done
+  echo "[dry-run] unpack to $OPT/releases/<version>"
   VERSION="(dry-run)"
 else
   if [ -n "${MA_LOCAL_TARBALL:-}" ] && [ -f "${MA_LOCAL_TARBALL:-}" ]; then
-    # Given by the updater after it downloaded (and, for release assets, sha256-checked) the owner's GitHub release.
+    # Given by the updater after it downloaded and sha256-checked the release.
     cp "$MA_LOCAL_TARBALL" "$TMPD/app.tgz"
   else
-    curl -fsSL "$RELEASE_BASE/myassistant-latest.tar.gz" -o "$TMPD/app.tgz"
-    curl -fsSL "$RELEASE_BASE/myassistant-latest.tar.gz.sha256" -o "$TMPD/app.sha256"
-    want="$(awk '{print $1}' "$TMPD/app.sha256")"; got="$(sha256sum "$TMPD/app.tgz" | awk '{print $1}')"
-    [ "$want" = "$got" ] || die "Download check failed (sha256 mismatch). Try again in a minute."
+    GOT_IT=0
+    for b in $SOURCES; do
+      say "Downloading the app from $b"
+      if curl -fsSL --max-time 300 "$b/myassistant-latest.tar.gz" -o "$TMPD/app.tgz" && curl -fsSL --max-time 30 "$b/myassistant-latest.tar.gz.sha256" -o "$TMPD/app.sha256"; then
+        want="$(awk '{print $1}' "$TMPD/app.sha256")"; got="$(sha256sum "$TMPD/app.tgz" | awk '{print $1}')"
+        [ "$want" = "$got" ] || die "Download check failed (sha256 mismatch) from $b. Not installing; try again in a minute."
+        GOT_IT=1; break
+      fi
+      warn "Could not download from $b; trying the next source"
+    done
+    [ "$GOT_IT" = 1 ] || die "Could not download the app from any source ($SOURCES). Check the internet connection and try again."
   fi
   mkdir -p "$TMPD/x" && tar -xzf "$TMPD/app.tgz" -C "$TMPD/x"
   VERSION="$(cat "$TMPD/x/myassistant/VERSION")"
@@ -166,7 +185,7 @@ MA_HOST=127.0.0.1
 MA_WORKSPACE=$SRV/workspace
 MA_SITES_DIR=$SRV/sites
 MA_SANDBOX_USER=$RUN_USER
-MA_RELEASE_BASE=$RELEASE_BASE
+MA_RELEASE_BASE=$ENV_RELEASE_BASE
 MA_EXTRA_DOMAINS=$EXTRA
 NODE_ENV=production
 EOF
@@ -207,7 +226,9 @@ EOF
 write_file /usr/local/sbin/myassistant-update 755 root:root <<EOF
 #!/usr/bin/env bash
 # Started only when the owner taps "Update now" or runs: sudo myassistant update (via the myassistant-update unit).
-# Source: the release site (default), or the owner's own GitHub repo when Settings → Updates names one.
+# Source (2.3.1): Settings → Updates → Update source (default https://updates.personalassistance.soft-tech.net), then the
+# repo's /docs on raw.githubusercontent.com, then the release site — sha256-checked; or the older "GitHub latest release"
+# mode when a repo owner/name is set.
 set -euo pipefail
 exec >"$DATA/update.log" 2>&1
 echo "=== update started \$(date -Is) ==="
@@ -222,9 +243,31 @@ if [ -f "\$HELPER" ]; then
   SRC="\$(printf '%s' "\$CFG" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).repo||"")}catch{}})')"
   TOKEN="\$(printf '%s' "\$CFG" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).token||"")}catch{}})')"
 fi
-if [ -z "\$SRC" ]; then
-  echo "source: $RELEASE_BASE"
-  curl -fsSL "$RELEASE_BASE/install.sh" | MA_UPDATE=1 MA_RELEASE_BASE="$RELEASE_BASE" bash
+USRC=""
+[ -n "\${CFG:-}" ] && USRC="\$(printf '%s' "\$CFG" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).source||"")}catch{}})')"
+if [ -z "\$SRC" ] && [ -f "\$HELPER" ] && grep -q fetch-auto "\$HELPER"; then
+  W="\$(mktemp -d)"; trap 'rm -rf "\$W"' EXIT
+  set +e
+  MA_UPDATE_SOURCE="\$USRC" MA_RELEASE_BASE="$ENV_RELEASE_BASE" node --disable-warning=ExperimentalWarning "\$HELPER" fetch-auto "\$W"
+  RC=\$?
+  set -e
+  if [ "\$RC" = 2 ]; then echo "Not updating: the download did not match its sha256."; exit 1; fi
+  if [ "\$RC" = 0 ] && [ -f "\$W/app.tgz" ]; then
+    mkdir -p "\$W/x" && tar -xzf "\$W/app.tgz" -C "\$W/x"
+    [ -f "\$W/x/myassistant/VERSION" ] && [ -f "\$W/x/myassistant/install.sh" ] || { echo "The download has no myassistant/VERSION + install.sh; not updating."; exit 1; }
+    echo "installing version \$(cat "\$W/x/myassistant/VERSION")"
+    MA_UPDATE=1 MA_LOCAL_TARBALL="\$W/app.tgz" MA_RELEASE_BASE="$ENV_RELEASE_BASE" MA_UPDATE_SOURCE="\$USRC" bash "\$W/x/myassistant/install.sh"
+  else
+    echo "the update helper could not finish; using a source's installer instead"
+    OK=0
+    for b in \${USRC:-https://updates.personalassistance.soft-tech.net} https://raw.githubusercontent.com/eliazer2499-max/Personal-assistant/main/docs $ENV_RELEASE_BASE; do
+      if curl -fsSL --max-time 60 "\$b/install.sh" -o "\$W/install.sh"; then echo "source: \$b"; MA_UPDATE=1 MA_RELEASE_BASE="\$b" bash "\$W/install.sh" && OK=1; break; fi
+    done
+    [ "\$OK" = 1 ] || { echo "No source could be reached; not updated."; exit 1; }
+  fi
+elif [ -z "\$SRC" ]; then
+  echo "source: $ENV_RELEASE_BASE"
+  curl -fsSL "$ENV_RELEASE_BASE/install.sh" | MA_UPDATE=1 MA_RELEASE_BASE="$ENV_RELEASE_BASE" bash
 else
   echo "source: GitHub \$SRC"
   W="\$(mktemp -d)"; trap 'rm -rf "\$W"' EXIT
@@ -239,7 +282,7 @@ else
   mkdir -p "\$W/x" && tar -xzf "\$W/app.tgz" -C "\$W/x"
   [ -f "\$W/x/myassistant/VERSION" ] && [ -f "\$W/x/myassistant/install.sh" ] || { echo "The download has no myassistant/VERSION + install.sh; not updating."; exit 1; }
   echo "installing version \$(cat "\$W/x/myassistant/VERSION")"
-  MA_UPDATE=1 MA_LOCAL_TARBALL="\$W/app.tgz" MA_RELEASE_BASE="$RELEASE_BASE" bash "\$W/x/myassistant/install.sh"
+  MA_UPDATE=1 MA_LOCAL_TARBALL="\$W/app.tgz" MA_RELEASE_BASE="$ENV_RELEASE_BASE" bash "\$W/x/myassistant/install.sh"
 fi
 echo "=== update finished \$(date -Is) ==="
 EOF

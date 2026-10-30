@@ -228,7 +228,9 @@ function parseSha(v) {
 export async function fetchMedia(obj, type) {
   if (!MEDIA_ID.test(String(obj?.id || ''))) throw new WaErr('media', 'the file id was malformed');
   const name0 = obj.filename || (type === 'audio' ? (obj.voice ? 'voice-note' : 'audio') : type === 'image' ? 'photo' : type);
-  const ext = { 'audio/ogg': '.ogg', 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'application/pdf': '.pdf', 'audio/mpeg': '.mp3', 'audio/mp4': '.m4a', 'audio/aac': '.aac' };
+  const ext = { 'audio/ogg': '.ogg', 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'application/pdf': '.pdf', 'audio/mpeg': '.mp3', 'audio/mp4': '.m4a', 'audio/aac': '.aac',
+    'application/zip': '.zip', 'text/csv': '.csv', 'text/plain': '.txt', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx' };
   let mime = String(obj.mime_type || '').split(';')[0].trim().toLowerCase();
   const name = /\.[a-z0-9]{1,5}$/i.test(name0) ? name0 : name0 + (ext[mime] || '');
   files.pickMime(mime, name);                     // throws 415 for kinds the brain cannot use (video, zip, …) before downloading
@@ -267,9 +269,12 @@ async function drain() {
       try {
         let id;
         if (it.type === 'file') {
-          const mediaId = await uploadMedia(it.buf, it.mime, it.name);
-          const kind = /^image\/(jpeg|png)$/.test(it.mime) ? 'image' : 'document';
-          id = await postMessage({ to: it.to, type: kind, [kind]: kind === 'document' ? { id: mediaId, filename: it.name } : { id: mediaId } });
+          const plan = filePlan(it.mime, it.name, it.buf.length);
+          const mediaId = await uploadMedia(it.buf, plan.mime, plan.name);
+          const obj = { id: mediaId };
+          if (plan.kind === 'document') obj.filename = plan.name;
+          if (it.caption && plan.kind !== 'audio') obj.caption = String(it.caption).slice(0, 1024);
+          id = await postMessage({ to: it.to, type: plan.kind, [plan.kind]: obj });
         } else id = await postMessage({ to: it.to, type: 'text', text: { body: it.text } });
         queue.shift();
         setSetting('wa_agent_last_out', String(now()));
@@ -304,6 +309,41 @@ export function splitText(text, max = CHUNK) {
   }
   if (s.trim()) out.push(s);
   return out.length ? out : [];
+}
+
+// ---------------------------------------------------------------- 2.3.1: files out
+// Meta's limits for agents, as the reference plugin (media.py SEND_LIMITS) states them: images 5 MiB (JPEG/PNG),
+// video 16 MiB (MP4/3GP), audio 16 MiB (MP3, M4A, AAC, AMR, Ogg), documents 16 MiB. Anything else goes as a file.
+const MIB = 1024 * 1024;
+export const WA_MAX_FILE = 16 * MIB;
+const AUDIO_OK = new Set(['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/amr', 'audio/ogg']);
+const VIDEO_OK = new Set(['video/mp4', 'video/3gpp']);
+const DOC_OK = new Set(['application/pdf', 'text/plain', 'application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation']);
+/** How one file goes to WhatsApp: { kind: image|audio|video|document, mime, name } (or throws when too big). */
+export function filePlan(mime, name, size) {
+  mime = String(mime || '').split(';')[0].trim().toLowerCase();
+  if (size > WA_MAX_FILE) throw Object.assign(new Error(`too big for WhatsApp (${(size / MIB).toFixed(1)} MB; WhatsApp agents take files up to 16 MB)`), { kind: 'too_big', status: 413 });
+  if (/^image\/(jpeg|png)$/.test(mime) && size <= 5 * MIB) return { kind: 'image', mime, name };
+  if (AUDIO_OK.has(mime)) return { kind: 'audio', mime, name };
+  if (VIDEO_OK.has(mime)) return { kind: 'video', mime, name };
+  if (DOC_OK.has(mime) && !/^image\//.test(mime)) return { kind: 'document', mime, name };
+  if (/^text\//.test(mime) || mime === 'application/json') return { kind: 'document', mime: 'text/plain', name };
+  return { kind: 'document', mime: 'application/octet-stream', name };     // zip, apk, big photos, other audio/video: as a file
+}
+/** send_file: one file (with an optional caption) to his agent chat; waits until WhatsApp took it. */
+export async function sendFileNow(row, caption = '') {
+  if (!enabled()) throw Object.assign(new Error('WhatsApp Agent is turned off (Settings → Channels)'), { kind: 'off' });
+  if (!hasKey()) throw Object.assign(new Error('no WhatsApp Agent key saved (Settings → Channels)'), { kind: 'off' });
+  const to = setting('wa_agent_creator');
+  if (!to) throw Object.assign(new Error('send the WhatsApp agent one message first, so I know your chat'), { kind: 'off' });
+  const plan = filePlan(row.mime, row.name, row.size);           // too big → throws before anything is sent
+  const jobs = [];
+  if (caption && plan.kind === 'audio') jobs.push(enqueue({ type: 'text', to, text: toWhatsApp(caption).slice(0, 4000) }));   // audio takes no caption
+  jobs.push(enqueue({ type: 'file', to, buf: fs.readFileSync(files.filePath(row)), mime: row.mime, name: row.name, caption: plan.kind === 'audio' ? '' : toWhatsApp(caption) }));
+  await Promise.all(jobs);
+  return plan.kind;
 }
 
 /** Send to the owner's agent chat. opts: { wait, files: [file rows] }. Without wait it returns at once (queued). */
@@ -365,7 +405,7 @@ async function handleInbound(m) {
     let row = null, problem = '';
     try { row = await fetchMedia(obj, type); }
     catch (e) {
-      if (e.status === 415) problem = `I can't open a ${LABEL[type]} like that here. Photos, voice notes, PDF, Word and text files work.`;
+      if (e.status === 415) problem = type === 'document' && e.message ? e.message : `I can't open a ${LABEL[type]} like that here. ${files.SUPPORTED_TEXT}`;
       else if (e.status === 413) problem = `That ${LABEL[type]} is too big for me (max 20 MB).`;
       else problem = `I couldn't download that ${LABEL[type]} from WhatsApp (${e.message}). Please send it again.`;
       log('wa agent media', type, e.message);

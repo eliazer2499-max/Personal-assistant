@@ -6,6 +6,8 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { cfg } from './config.js';
 import { all, get, run, now } from './db.js';
+import { docxText, pptxText, xlsxSummary, csvSummary, zipSummary } from './extract.js';
+export { docxText };
 
 export const MAX_FILE = 20 * 1024 * 1024;           // one upload
 export const MAX_INLINE = 18 * 1024 * 1024;         // all media in one model request (Gemini allows ~20 MB)
@@ -18,6 +20,10 @@ const TYPES = {
   'application/pdf': 'pdf',
   'text/plain': 'text', 'text/markdown': 'text', 'text/csv': 'text', 'application/json': 'text', 'text/html': 'text', 'text/xml': 'text', 'application/xml': 'text',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  // 2.3.1: Excel, PowerPoint and zip are read too (text and tables are extracted on the server)
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/zip': 'zip',
 };
 const BY_EXT = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.heic': 'image/heic', '.heif': 'image/heif',
@@ -25,9 +31,21 @@ const BY_EXT = {
   '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv', '.json': 'application/json', '.log': 'text/plain',
   '.html': 'text/html', '.htm': 'text/html', '.xml': 'text/xml', '.js': 'text/plain', '.py': 'text/plain', '.sh': 'text/plain', '.yml': 'text/plain', '.yaml': 'text/plain',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.zip': 'application/zip', '.tsv': 'text/csv', '.markdown': 'text/markdown',
 };
+// 2.3.1: code and config files are read as text.
+for (const e of ['ts', 'tsx', 'jsx', 'mjs', 'cjs', 'css', 'scss', 'java', 'kt', 'kts', 'swift', 'go', 'rs', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'rb', 'php', 'sql',
+  'toml', 'ini', 'cfg', 'conf', 'properties', 'gradle', 'dart', 'lua', 'r', 'pl', 'scala', 'vue', 'svelte', 'bat', 'ps1', 'bash', 'zsh', 'srt', 'vtt', 'tex', 'rtf'])
+  BY_EXT['.' + e] = 'text/plain';
+// Formats that look readable but are not (yet): a clear answer instead of a generic one.
+const NOT_READ = { '.doc': 'Old Word .doc files can\'t be read here. Save it as .docx or PDF and send it again.',
+  '.xls': 'Old Excel .xls files can\'t be read here. Save it as .xlsx or CSV and send it again.',
+  '.ppt': 'Old PowerPoint .ppt files can\'t be read here. Save it as .pptx or PDF and send it again.',
+  '.rar': 'RAR archives can\'t be opened here. Send it as a .zip.', '.7z': '7-Zip archives can\'t be opened here. Send it as a .zip.' };
+export const SUPPORTED_TEXT = 'Photos, voice notes, PDF, Word, Excel, PowerPoint, CSV, text/code files and .zip work.';
 // Shown inline in the browser; everything else downloads.
-const INLINE_OK = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'audio/wav', 'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/aac', 'audio/flac', 'application/pdf', 'text/plain']);
+const INLINE_OK = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'audio/wav', 'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/aac', 'audio/flac', 'application/pdf', 'text/plain', 'video/mp4', 'video/webm', 'video/quicktime']);
 
 const dir = () => path.join(cfg.dataDir, 'files');
 const err = (status, message) => Object.assign(new Error(message), { status });
@@ -40,8 +58,13 @@ export function pickMime(declared, name) {
   if (m === 'audio/mp3') m = 'audio/mpeg';
   if (m === 'video/webm') m = 'audio/webm';       // some browsers label audio-only recordings as video
   if (m === 'video/mp4' && /voice/i.test(name || '')) m = 'audio/mp4';
-  if (!TYPES[m]) m = BY_EXT[path.extname(String(name || '')).toLowerCase()] || m;
-  if (!TYPES[m]) throw err(415, 'That file type is not supported yet. Send photos, voice notes, PDF, Word (.docx) or text files.');
+  if (m === 'application/x-zip-compressed' || m === 'application/x-zip') m = 'application/zip';
+  if (m === 'text/tab-separated-values') m = 'text/csv';
+  const ext = path.extname(String(name || '')).toLowerCase();
+  if (NOT_READ[ext]) throw err(415, NOT_READ[ext]);
+  if (!TYPES[m]) m = BY_EXT[ext] || m;
+  if (!TYPES[m] && (/^text\//.test(m) || /^application\/(javascript|x-javascript|x-sh|x-python|x-yaml|yaml|sql|x-httpd-php|toml)$/.test(m))) m = 'text/plain';
+  if (!TYPES[m]) throw err(415, 'I can\'t read that type of file' + (ext ? ` (${ext})` : '') + '. ' + SUPPORTED_TEXT);
   return m;
 }
 export function safeName(name) {
@@ -57,6 +80,8 @@ export function saveUpload(buf, declaredMime, name, chatId) {
   const kind = TYPES[mime];
   if (kind === 'image' && !looksLikeImage(buf)) throw err(415, 'That does not look like an image.');
   if (kind === 'pdf' && buf.subarray(0, 5).toString('latin1') !== '%PDF-') throw err(415, 'That does not look like a PDF.');
+  if (['docx', 'xlsx', 'pptx', 'zip'].includes(kind) && buf.subarray(0, 2).toString('latin1') !== 'PK') throw err(415, 'That file looks damaged (it is not a real ' + (kind === 'zip' ? '.zip' : '.' + kind) + ' file).');
+  if (kind === 'text' && buf.subarray(0, 8192).includes(0)) throw err(415, 'That does not look like a text file.');
   fs.mkdirSync(dir(), { recursive: true, mode: 0o700 });
   const id = crypto.randomBytes(16).toString('hex');
   fs.writeFileSync(path.join(dir(), id), buf, { mode: 0o600 });
@@ -73,8 +98,38 @@ export function saveGenerated(buf, mime, name, chatId, messageId) {
   fs.mkdirSync(dir(), { recursive: true, mode: 0o700 });
   const id = crypto.randomBytes(16).toString('hex');
   fs.writeFileSync(path.join(dir(), id), buf, { mode: 0o600 });
-  run('INSERT INTO files(id,name,mime,size,kind,created,chat_id,message_id) VALUES(?,?,?,?,?,?,?,?)', id, safeName(name), mime, buf.length, TYPES[mime] || 'image', now(), chatId || null, messageId || null);
+  run('INSERT INTO files(id,name,mime,size,kind,created,chat_id,message_id) VALUES(?,?,?,?,?,?,?,?)', id, safeName(name), mime, buf.length, TYPES[mime] || outKind(mime), now(), chatId || null, messageId || null);
   return publicFile(get('SELECT * FROM files WHERE id=?', id));
+}
+
+// ---------- 2.3.1: files the assistant sends to the owner (send_file) ----------
+export const MAX_SEND = 50 * 1024 * 1024;           // into the web chat
+const OUT_EXT = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.3gp': 'video/3gpp', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
+  '.apk': 'application/vnd.android.package-archive', '.doc': 'application/msword', '.xls': 'application/vnd.ms-excel', '.ppt': 'application/vnd.ms-powerpoint',
+  '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.tar': 'application/x-tar', '.gz': 'application/gzip', '.tgz': 'application/gzip', '.rar': 'application/vnd.rar', '.7z': 'application/x-7z-compressed',
+  '.epub': 'application/epub+zip', '.ics': 'text/calendar', '.vcf': 'text/vcard', '.webm': 'video/webm' };
+/** The type of a file the assistant sends, from its name (the content is not trusted for display: see server.js). */
+export function outMime(name) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  return OUT_EXT[ext] || BY_EXT[ext] || 'application/octet-stream';
+}
+export function outKind(mime) {
+  if (/^image\/(jpeg|png|webp|gif)$/.test(mime)) return 'image';
+  if (/^audio\//.test(mime)) return 'audio';
+  if (/^video\//.test(mime)) return 'video';
+  if (mime === 'application/pdf') return 'pdf';
+  return TYPES[mime] && TYPES[mime] !== 'image' ? TYPES[mime] : 'file';
+}
+/** Copy a file the assistant is sending into the chat's file store, under its message. */
+export function saveOutgoing(buf, name, chatId, messageId) {
+  const fname = safeName(name);
+  let mime = outMime(fname);
+  if (/^image\//.test(mime) && mime !== 'image/svg+xml' && !looksLikeImage(buf)) mime = 'application/octet-stream';   // never show a non-image as one
+  fs.mkdirSync(dir(), { recursive: true, mode: 0o700 });
+  const id = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(dir(), id), buf, { mode: 0o600 });
+  run('INSERT INTO files(id,name,mime,size,kind,created,chat_id,message_id) VALUES(?,?,?,?,?,?,?,?)', id, fname, mime, buf.length, outKind(mime), now(), chatId || null, messageId || null);
+  return get('SELECT * FROM files WHERE id=?', id);
 }
 export const publicFile = (f) => f ? { id: f.id, name: f.name, mime: f.mime, size: f.size, kind: f.kind } : null;
 export function fileRow(id) { return /^[a-f0-9]{32}$/.test(String(id || '')) ? get('SELECT * FROM files WHERE id=?', String(id)) || null : null; }
@@ -117,31 +172,6 @@ export function purgeUnsent(maxAgeMs = 24 * 3600 * 1000) {
 }
 
 // ---------- turning files into model input ----------
-/** Word .docx -> plain text (reads word/document.xml from the zip; no dependencies). */
-export function docxText(buf) {
-  // find the End Of Central Directory record
-  let eocd = -1;
-  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 66000); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
-  if (eocd < 0) throw new Error('not a .docx (zip) file');
-  const count = buf.readUInt16LE(eocd + 10);
-  let p = buf.readUInt32LE(eocd + 16);
-  for (let n = 0; n < count && p + 46 <= buf.length; n++) {
-    if (buf.readUInt32LE(p) !== 0x02014b50) break;
-    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20);
-    const nlen = buf.readUInt16LE(p + 28), xlen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32), off = buf.readUInt32LE(p + 42);
-    const name = buf.subarray(p + 46, p + 46 + nlen).toString('utf8');
-    p += 46 + nlen + xlen + clen;
-    if (name !== 'word/document.xml') continue;
-    const lnlen = buf.readUInt16LE(off + 26), lxlen = buf.readUInt16LE(off + 28);
-    const data = buf.subarray(off + 30 + lnlen + lxlen, off + 30 + lnlen + lxlen + csize);
-    const xml = (method === 8 ? zlib.inflateRawSync(data, { maxOutputLength: 50 * 1024 * 1024 }) : data).toString('utf8');
-    return xml.replace(/<w:tab\/>/g, '\t').replace(/<w:br\/>|<\/w:p>/g, '\n').replace(/<[^>]+>/g, '')
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&')
-      .replace(/\n{3,}/g, '\n\n').trim();
-  }
-  throw new Error('no text found in the .docx');
-}
-
 const TEXT_MAX = 120000;
 /**
  * Model input for a message's files.
@@ -154,12 +184,26 @@ export function modelInput(files, budget = MAX_INLINE) {
     const label = f.kind === 'audio' ? 'voice note / audio' : f.kind;
     let buf;
     try { buf = fs.readFileSync(filePath(f)); } catch { notes.push(`[Attachment "${f.name}" is no longer on the server]`); continue; }
-    if (f.kind === 'text') {
+    if (f.kind === 'text' && f.mime === 'text/csv') {
+      const t = buf.toString('utf8');
+      notes.push(`[Table file "${f.name}" (CSV), summary:]\n${csvSummary(t, f.name)}` + (t.length <= 20000 ? `\n\n[Whole file:]\n${t}` : ''));
+    } else if (f.kind === 'xlsx') {
+      try { const s = xlsxSummary(buf); notes.push(`[Excel file "${f.name}", ${s.sheets} sheet${s.sheets === 1 ? '' : 's'}:]\n${s.text}`); }
+      catch (e) { notes.push(`[Excel file "${f.name}" could not be read: ${e.message}]`); }
+    } else if (f.kind === 'pptx') {
+      try { const t = pptxText(buf); notes.push(`[PowerPoint file "${f.name}"]\n${t.slice(0, TEXT_MAX)}${t.length > TEXT_MAX ? '\n…(cut, file is longer)' : ''}`); }
+      catch (e) { notes.push(`[PowerPoint file "${f.name}" could not be read: ${e.message}]`); }
+    } else if (f.kind === 'zip') {
+      try { notes.push(`[${zipSummary(buf, f.name)}]`); }
+      catch (e) { notes.push(`[Zip file "${f.name}" could not be opened: ${e.message}]`); }
+    } else if (f.kind === 'text') {
       const t = buf.toString('utf8');
       notes.push(`[File "${f.name}"]\n${t.slice(0, TEXT_MAX)}${t.length > TEXT_MAX ? '\n…(cut, file is longer)' : ''}`);
     } else if (f.kind === 'docx') {
       try { const t = docxText(buf); notes.push(`[Word file "${f.name}"]\n${t.slice(0, TEXT_MAX)}${t.length > TEXT_MAX ? '\n…(cut, file is longer)' : ''}`); }
       catch (e) { notes.push(`[Word file "${f.name}" could not be read: ${e.message}]`); }
+    } else if (!['image', 'audio', 'pdf'].includes(f.kind)) {
+      notes.push(`[File "${f.name}" (${f.mime}, ${Math.round(f.size / 1024)} KB): this type can't be read here.]`);
     } else if (bytes + buf.length <= budget) {
       media.push({ mime: f.mime, data: buf.toString('base64'), name: f.name, kind: f.kind });
       bytes += buf.length;

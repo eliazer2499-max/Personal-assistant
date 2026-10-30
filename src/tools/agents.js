@@ -1,6 +1,6 @@
 // 2.1 tools: helper jobs (delegate / helpers_wait) and picture creation (image_generate).
 import { cfg } from '../config.js';
-import { all, get, setting, secret, redact, log } from '../db.js';
+import { all, get, setting, secret, redact, log, audit } from '../db.js';
 
 const S = (description, extra = {}) => ({ type: 'string', description, ...extra });
 const MAX_HELPERS = 4;
@@ -85,9 +85,9 @@ const imageGenerate = {
     parts.push({ text: String(prompt).slice(0, 4000) });
     const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'] } });
     let model = setting('image_model') || 'gemini-3.1-flash-image';
-    let r, j;
+    let r, j, usedKey = null;
     for (let ki = 0; ki < keyList.length; ki++) {
-      const key = keyList[ki].key;
+      const key = keyList[ki].key; usedKey = keyList[ki];
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           r = await fetch(`${gBase()}/v1beta/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body, signal: AbortSignal.timeout(180000) });
@@ -109,6 +109,7 @@ const imageGenerate = {
       break;
     }
     if (!r.ok) return { error: friendly(r.status, redact(j.error?.message || '')) };
+    if (usedKey) audit('assistant', 'brain.route', `Pictures${ctx.jobId ? ' (job ' + ctx.jobId + ')' : ''}: '${usedKey.name}'${usedKey.tagged === false ? ' — no key is set to "Pictures", so another Gemini key made it' : ''}`);
     const out = (j.candidates?.[0]?.content?.parts || []);
     const img = out.find(p => p.inlineData && /^image\//.test(p.inlineData.mimeType || ''));
     const words = out.filter(p => p.text && !p.thought).map(p => p.text).join(' ').trim();

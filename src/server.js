@@ -21,6 +21,7 @@ import { appKey, sshExec } from './tools/ssh.js';
 import { seal } from './crypto.js';
 import { startScheduler, backupNow } from './scheduler.js';
 import * as updates from './updates.js';
+import { normalizeSource, label as srcLabel } from './release-source.js';
 import * as chats from './chats.js';
 import * as files from './files.js';
 
@@ -134,7 +135,7 @@ R('GET', /^\/api\/audit$/, (c) => {
 });
 
 // settings / brain
-const PLAIN_KEYS = ['assistant_name', 'provider', 'model', 'openai_base_url', 'openai_model', 'max_steps', 'max_minutes', 'max_parallel', 'image_model', 'update_repo', 'history_messages', 'timezone', 'notify_channel', 'morning_summary', 'morning_time', 'continue_after_approval', 'update_url', 'backup_keep', 'backup_drive_account', 'owner_emails'];
+const PLAIN_KEYS = ['assistant_name', 'provider', 'model', 'openai_base_url', 'openai_model', 'max_steps', 'max_minutes', 'max_parallel', 'image_model', 'update_repo', 'history_messages', 'timezone', 'notify_channel', 'morning_summary', 'morning_time', 'continue_after_approval', 'update_url', 'update_source', 'backup_keep', 'backup_drive_account', 'owner_emails'];
 R('GET', /^\/api\/settings$/, () => {
   const s = allSettings(); const o = {};
   for (const k of PLAIN_KEYS) o[k] = s[k];
@@ -148,6 +149,12 @@ R('POST', /^\/api\/settings$/, (c) => {
     if (k === 'timezone') { try { new Intl.DateTimeFormat('en', { timeZone: v }); } catch { throw auth.httpErr(400, 'Unknown time zone'); } }
     if (k === 'morning_time' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) throw auth.httpErr(400, 'Time like 07:30');
     if (k === 'update_url' && v && !/^https:\/\//.test(v)) throw auth.httpErr(400, 'Update link must be https');
+    if (k === 'update_source') {
+      if (v) v = normalizeSource(v);
+      if (v && !/^https:\/\/[^\s/]+\.[^\s/]+(\/[^\s]*)?$/.test(v)) throw auth.httpErr(400, 'Update source: an https address like https://updates.example.com, or blank for the default');
+      if (v === normalizeSource(cfg.updateSource)) v = '';
+      if (v !== setting('update_source')) { audit('owner', 'update.source', v || 'default (' + cfg.updateSource + ')'); setSetting('update_available', ''); }
+    }
     if (k === 'max_parallel') { const n = parseInt(v, 10); if (!(n >= 1 && n <= 6)) throw auth.httpErr(400, 'Jobs at the same time: 1 to 6'); v = String(n); }
     if (k === 'image_model' && v && !/^[a-z0-9][a-z0-9.\-]*$/i.test(v)) throw auth.httpErr(400, 'Model names look like gemini-3.1-flash-image');
     if (k === 'update_repo') { v = v.replace(/^https:\/\/github\.com\//i, '').replace(/\.git$/, '').replace(/\/+$/, ''); if (v && !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(v)) throw auth.httpErr(400, 'Update source: a GitHub repo like owner/name, or blank for the default'); if (v !== setting('update_repo')) { audit('owner', 'update.source', v || 'default'); setSetting('update_available', ''); } }
@@ -282,7 +289,8 @@ R('GET', /^\/api\/projects$/, async () => {
 });
 
 // updates, backups, security
-R('GET', /^\/api\/update$/, () => ({ current: VERSION, available: setting('update_available'), notes: setting('update_notes'), url: updates.updateUrl(), repo: updates.updateRepo(), default_source: cfg.releaseBase, log: updates.updateLog() }));
+R('GET', /^\/api\/update$/, () => { const list = updates.updateSources(); return { current: VERSION, available: setting('update_available'), notes: setting('update_notes'), url: updates.updateUrl(), repo: updates.updateRepo(), default_source: cfg.releaseBase,
+  source: setting('update_source'), source_default: cfg.updateSource, sources: list.map(srcLabel), checked_from: setting('update_checked_from'), log: updates.updateLog() }; });
 R('POST', /^\/api\/update\/check$/, async () => updates.checkUpdate(true));
 R('POST', /^\/api\/update\/apply$/, () => updates.applyUpdate());
 R('POST', /^\/api\/backup\/now$/, () => ({ file: path.basename(backupNow()) }));

@@ -118,7 +118,7 @@ function chatView(id) {
   const log = h('div', { class: 'log', id: 'log', 'aria-live': 'polite' });
   const input = h('textarea', { id: 'input', rows: 1, placeholder: 'Ask or give me a job…', 'aria-label': 'Message' });
   const tray = h('div', { class: 'tray', id: 'tray' });
-  const fileInput = h('input', { type: 'file', multiple: true, accept: 'image/*,application/pdf,.pdf,.txt,.md,.csv,.json,.docx,audio/*', style: 'display:none', 'aria-hidden': 'true',
+  const fileInput = h('input', { type: 'file', multiple: true, accept: 'image/*,audio/*,application/pdf,.pdf,.txt,.md,.csv,.tsv,.json,.docx,.xlsx,.pptx,.zip,.js,.ts,.jsx,.tsx,.py,.html,.css,.xml,.yml,.yaml,.sql,.sh,.log,.java,.kt,.php,.go,.rs,.c,.cpp', style: 'display:none', 'aria-hidden': 'true',
     onchange: () => { const fl = [...fileInput.files]; fileInput.value = ''; fl.forEach(f => addFile(f, refresh)); } });
   const clip = h('button', { class: 'icon', type: 'button', 'aria-label': 'Attach a photo or file', title: 'Photo or file', onclick: () => fileInput.click() }, '📎');
   const send = h('button', { class: 'send', type: 'submit', 'aria-label': 'Send' }, '➤');
@@ -411,8 +411,16 @@ function pcmToNote(d) {
 function fileView(f, generated) {
   if (f.kind === 'image') return h('div', { class: 'att' }, h('a', { href: fileUrl(f), target: '_blank', rel: 'noopener', class: 'att-img' }, h('img', { src: fileUrl(f), alt: f.name, loading: 'lazy' })),
     generated ? h('a', { class: 'att-dl', href: fileUrl(f, true) }, '⬇ Download') : null);
+  // 2.3.1: files the assistant sends you: a player for audio/video, open + download for PDF, a download chip for the rest
+  if (f.kind === 'audio' && generated) return h('div', { class: 'att att-card', 'data-sent': f.id }, h('div', { class: 'acname' }, h('span', { 'aria-hidden': 'true' }, '🎵 '), h('b', {}, f.name), h('small', {}, ' · ' + fmtSize(f.size))),
+    voicePlayer(fileUrl(f), { waveUrl: fileUrl(f) + '/wave' }), h('a', { class: 'att-dl', href: fileUrl(f, true) }, '⬇ Download'));
   if (f.kind === 'audio') return h('div', { class: 'att att-voice' }, voicePlayer(fileUrl(f), { waveUrl: fileUrl(f) + '/wave' }));
-  return h('a', { href: fileUrl(f, true), class: 'att att-file' }, (f.kind === 'pdf' ? '📄 ' : '📎 ') + f.name, h('small', {}, ' · ' + fmtSize(f.size)));
+  if (f.kind === 'video') return h('div', { class: 'att att-chip', 'data-sent': f.id }, h('a', { class: 'att-file', href: fileUrl(f), target: '_blank', rel: 'noopener' }, '🎬 ' + f.name, h('small', {}, ' · ' + fmtSize(f.size) + ' · ▶ Play')),
+    h('a', { class: 'att-dl', href: fileUrl(f, true) }, '⬇ Download'));
+  const icon = { pdf: '📄', docx: '📝', xlsx: '📊', pptx: '📽️', zip: '🗜️', text: '📃' }[f.kind] || (/\.apk$/i.test(f.name) ? '📦' : '📎');
+  if (f.kind === 'pdf' && generated) return h('div', { class: 'att att-chip', 'data-sent': f.id }, h('a', { class: 'att-file', href: fileUrl(f), target: '_blank', rel: 'noopener' }, icon + ' ' + f.name, h('small', {}, ' · ' + fmtSize(f.size))),
+    h('a', { class: 'att-dl', href: fileUrl(f, true) }, '⬇ Download'));
+  return h('a', { href: fileUrl(f, true), class: 'att att-file', 'data-sent': generated ? f.id : null }, icon + ' ' + f.name, h('small', {}, ' · ' + fmtSize(f.size) + (generated ? ' · ⬇' : '')));
 }
 function addBubble(m, approvalStatus) {
   const log = document.getElementById('log'); if (!log) return;
@@ -561,120 +569,213 @@ function serversView() {
 }
 
 // ---------------- settings ----------------
-const SETTINGS_MENU = [['brain', 'Brain (AI model)', 'AI keys, model, limits'], ['google', 'Google accounts', 'Gmail, Calendar, Drive, Docs, Sheets, Contacts'], ['channels', 'Channels', 'WhatsApp Agent, Telegram, email, text/SMS'], ['tools', 'Tools', 'turn abilities on or off'], ['updates', 'Updates & backups', ''], ['security', 'Security', 'password, 2-step, sessions']];
+// 2.3.1: one tidy grouped list. Every page keeps its address (#/settings/brain, …) so old links still work.
+const SETTINGS_GROUPS = [
+  ['Assistant', [['brain', '🧠', 'Brain (AI keys)', 'AI keys, who does what, models, limits'], ['general', '⚙️', 'General', 'Name, time zone, morning summary, light/dark']]],
+  ['Connections', [['channels', '💬', 'Channels', 'WhatsApp Agent, Telegram, email, text/SMS'], ['google', '📧', 'Google accounts', 'Gmail, Calendar, Drive, Docs, Sheets, Contacts'], ['#/more/vault', '🔑', 'Vault', 'Tokens for GitHub, Cloudflare and more']]],
+  ['Abilities', [['tools', '🧰', 'Tools', 'Turn abilities on or off']]],
+  ['System', [['updates', '⬆️', 'Updates & backups', 'New version, update, backups'], ['security', '🛡️', 'Security', 'Password, 2-step sign-in, sessions'], ['#/more/audit', '📜', 'Activity log', 'What it did, and which key answered']]],
+];
+const SETTINGS_MENU = SETTINGS_GROUPS.flatMap(([, items]) => items).filter(x => !x[0].startsWith('#')).map(([id, , t, s]) => [id, t, s]);
 function settingsView(sub) {
-  if (!sub) return shell('settings', 'Settings', 'v' + (ME?.version || ''), h('div', { class: 'page' }, h('div', { class: 'list' }, SETTINGS_MENU.map(([id, t, s]) => h('a', { class: 'item', href: '#/settings/' + id }, h('div', {}, t, s ? h('span', { class: 'sub' }, s) : null), h('span', { class: 'chev' }, '›'))))));
-  const views = { brain: brainView, google: googleView, channels: channelsView, tools: toolsView, updates: updatesView, security: securityView };
-  const [title, , subt] = SETTINGS_MENU.find(x => x[0] === sub) || ['Settings'];
+  if (!sub) {
+    const page = h('div', { class: 'page setpage' },
+      h('div', { class: 'sethero' }, h('div', {}, h('b', {}, ME?.name || 'My Assistant'), h('span', { class: 'sub' }, 'Version ' + (ME?.version || ''))),
+        ME?.update_available ? h('a', { class: 'pill warn', href: '#/settings/updates' }, 'Update ready') : null),
+      SETTINGS_GROUPS.map(([g, items]) => h('section', { class: 'setgroup' }, h('h2', { class: 'grouphead' }, g),
+        h('div', { class: 'list setlist' }, items.map(([id, ic, t, s]) => h('a', { class: 'item setitem', href: id.startsWith('#') ? id : '#/settings/' + id, 'data-set': id.replace(/^#\/more\//, '') },
+          h('span', { class: 'setic', 'aria-hidden': 'true' }, ic), h('div', { class: 'settext' }, h('span', { class: 'sett' }, t), h('span', { class: 'sub' }, s)),
+          id === 'updates' && ME?.update_available ? h('span', { class: 'dot', 'aria-label': 'update ready' }) : null, h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')))))));
+    return shell('settings', 'Settings', '', page);
+  }
+  const views = { brain: brainView, general: generalView, google: googleView, channels: channelsView, tools: toolsView, updates: updatesView, security: securityView };
   const body = h('div', { class: 'page' });
   (views[sub] || (() => {}))(body);
   return shell('settings', (SETTINGS_MENU.find(x => x[0] === sub) || [, 'Settings'])[1], '', body, { back: '#/settings' });
 }
-async function brainView(body) {
-  const r = await api('/api/settings'); const s = r.settings;
-  const out = msgEl(), out2 = msgEl();
-  const model = h('input', { id: 'model', value: s.model, autocapitalize: 'off', spellcheck: 'false' });
-  const name = h('input', { id: 'aname', value: s.assistant_name }), tz = h('input', { id: 'tz', value: s.timezone }), steps = h('input', { id: 'steps', value: s.max_steps, inputmode: 'numeric' }), mins = h('input', { id: 'mins', value: s.max_minutes, inputmode: 'numeric' });
+
+// Light / dark (stored on this device). Auto follows the phone.
+function applyTheme() { const t = localStorage.getItem('ma_theme') || 'auto'; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
+applyTheme();
+
+async function generalView(body) {
+  const r = await api('/api/settings'); const s = r.settings; const out = msgEl();
+  const name = h('input', { id: 'aname', value: s.assistant_name }), tz = h('input', { id: 'tz', value: s.timezone });
   const morning = h('input', { type: 'checkbox', id: 'morn' }); morning.checked = s.morning_summary === '1';
   const mtime = h('input', { id: 'mtime', value: s.morning_time, placeholder: '07:30' });
-  const par = h('select', { id: 'par' }, [1, 2, 3, 4, 5, 6].map(n => h('option', { value: String(n) }, String(n)))); par.value = String(s.max_parallel || '3');
-  const imodel = h('input', { id: 'imodel', value: s.image_model || '', placeholder: 'gemini-3.1-flash-image', autocapitalize: 'off', spellcheck: 'false' });
-  const keysCard = h('div', { class: 'card', id: 'aikeys' });
+  const theme = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Appearance' }, [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => {
+    const b = h('button', { type: 'button', role: 'radio', 'data-theme-set': v, 'aria-checked': String((localStorage.getItem('ma_theme') || 'auto') === v), onclick: () => { localStorage.setItem('ma_theme', v); applyTheme(); theme.querySelectorAll('button').forEach(x => x.setAttribute('aria-checked', String(x === b))); } }, l);
+    return b;
+  }));
   body.append(
-    keysCard,
-    h('div', { class: 'card' }, h('h3', {}, 'Models'),
-      h('label', { for: 'model' }, 'Default Gemini model'), model,
-      h('p', { class: 'fine' }, 'Used by Gemini keys whose Model is left empty. A model ending in “-lite” has a bigger free limit.'),
-      h('label', { for: 'imodel' }, 'Picture model (for “make a picture of…”)'), imodel,
-      h('p', { class: 'fine' }, 'Pictures use your first active Gemini key that works.'),
-      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', onclick: (e) => act(e.target, out, () => api('/api/settings', { model: model.value, image_model: imodel.value }), 'Saved.').then(() => paintKeys()) }, 'Save')), out,
-      h('p', { class: 'fine' }, 'Privacy, honestly: what you ask, and the mail/file text a tool reads to answer you, is sent to the AI provider of the key in use (Google for Gemini keys). On free tiers the provider may use it to improve its products. Your keys and tokens stay on your server.')),
-    h('div', { class: 'card' }, h('h3', {}, 'General'), h('label', { for: 'aname' }, 'Assistant name'), name, h('label', { for: 'tz' }, 'Time zone'), tz,
-      h('div', { class: 'row' }, h('div', { style: 'flex:1' }, h('label', { for: 'steps' }, 'Max steps per job'), steps), h('div', { style: 'flex:1' }, h('label', { for: 'mins' }, 'Max minutes per job'), mins)),
-      h('label', { for: 'par' }, 'Jobs at the same time'), par, h('p', { class: 'fine' }, 'Default 3. The free Gemini key has per-minute limits, so more jobs at once may make each one slower.'),
-      h('div', { class: 'switch' }, h('label', { for: 'morn', style: 'margin:0;color:var(--text)' }, 'Morning summary'), morning), h('label', { for: 'mtime' }, 'Summary time (24h)'), mtime,
-      h('div', { style: 'margin-top:12px' }, h('button', { class: 'primary', style: 'width:100%', onclick: (e) => act(e.target, out2, () => api('/api/settings', { assistant_name: name.value, timezone: tz.value, max_steps: steps.value, max_minutes: mins.value, max_parallel: par.value, morning_summary: morning.checked ? '1' : '0', morning_time: mtime.value })) }, 'Save')), out2));
-  let K = null, adding = false; const open = new Set(); const testOut = {};
+    h('div', { class: 'card' }, h('h3', {}, 'Assistant'), h('label', { for: 'aname' }, 'Assistant name'), name, h('label', { for: 'tz' }, 'Time zone'), tz,
+      h('p', { class: 'fine' }, 'Like America/New_York. Reminders and the morning summary use it.')),
+    h('div', { class: 'card' }, h('h3', {}, 'Morning summary'),
+      h('div', { class: 'switch' }, h('label', { for: 'morn', style: 'margin:0;color:var(--text)' }, 'Send me a morning summary'), morning), h('label', { for: 'mtime' }, 'Time (24h)'), mtime),
+    h('button', { class: 'primary', style: 'width:100%', onclick: (e) => act(e.target, out, () => api('/api/settings', { assistant_name: name.value, timezone: tz.value, morning_summary: morning.checked ? '1' : '0', morning_time: mtime.value })) }, 'Save'), out,
+    h('div', { class: 'card', style: 'margin-top:14px' }, h('h3', {}, 'Appearance'), h('p', { class: 'fine', style: 'margin-top:0' }, 'On this device. Auto follows your phone.'), theme));
+}
+
+const USE_ORDER = ['chat', 'coding', 'pictures', 'media', 'background'];
+const USE_INFO = { chat: ['💬', 'Chat', 'everyday questions and tasks'], coding: ['💻', 'Coding', 'apps, sites, scripts, servers'], pictures: ['🎨', 'Pictures', 'making pictures (Gemini only)'],
+  media: ['🎤', 'Voice, photos & files', 'voice notes, photos, PDFs'], background: ['⏰', 'Background jobs', 'reminders, summaries, helpers'] };
+const USE_SHORT = { chat: '💬 Chat', coding: '💻 Coding', pictures: '🎨 Pictures', media: '🎤 Voice & files', background: '⏰ Background' };
+function keyStatus(k) {
+  if (!k.active) return ['Off', ''];
+  if (k.resting_until) return ['Resting till ' + String(k.resting_until_text).replace(/\s+[A-Z]{2,5}$/, ''), 'warn'];
+  if (k.problem) return [k.problem[0].toUpperCase() + k.problem.slice(1), 'err'];
+  if (k.in_use) return ['✓ In use', 'ok'];
+  if (k.last_ok) return ['✓ Working', 'ok'];
+  return [k.has_key || k.kind === 'openai' ? 'Not used yet' : 'No key saved', k.has_key ? '' : 'warn'];
+}
+/** Which key the assistant would pick for each kind of job right now (same rule as the server). */
+function whoDoesWhat(keys) {
+  const free = (k) => k.active && !k.resting_until && !k.problem && (k.has_key || k.kind === 'openai');
+  return USE_ORDER.map(u => {
+    const pool = u === 'pictures' ? keys.filter(k => k.kind === 'gemini') : keys;
+    const tagged = (u === 'media' ? pool.find(k => free(k) && k.use_for.includes(u) && k.kind === 'gemini') : null) || pool.find(k => free(k) && k.use_for.includes(u));
+    const any = tagged || (u === 'media' ? pool.find(k => free(k) && k.kind === 'gemini') : null) || pool.find(k => free(k));
+    return [u, any, !!tagged];
+  });
+}
+
+async function brainView(body) {
+  const r = await api('/api/settings'); const s = r.settings;
+  const keysSec = h('section', { id: 'aikeys', class: 'bsec' }), whoSec = h('section', { class: 'bsec', id: 'whowhat' });
+  // Models
+  const outM = msgEl(), outL = msgEl();
+  const model = h('input', { id: 'model', value: s.model, autocapitalize: 'off', spellcheck: 'false' });
+  const imodel = h('input', { id: 'imodel', value: s.image_model || '', placeholder: 'gemini-3.1-flash-image', autocapitalize: 'off', spellcheck: 'false' });
+  const steps = h('input', { id: 'steps', value: s.max_steps, inputmode: 'numeric' }), mins = h('input', { id: 'mins', value: s.max_minutes, inputmode: 'numeric' });
+  const par = h('select', { id: 'par' }, [1, 2, 3, 4, 5, 6].map(n => h('option', { value: String(n) }, String(n)))); par.value = String(s.max_parallel || '3');
+  body.append(keysSec, whoSec,
+    h('section', { class: 'bsec', id: 'models' }, h('h2', { class: 'grouphead' }, 'Models'),
+      h('div', { class: 'card' },
+        h('label', { for: 'model', style: 'margin-top:0' }, 'Default Gemini model'), model,
+        h('p', { class: 'fine' }, 'For Gemini keys whose Model is empty. A model ending in “-lite” has a bigger free limit.'),
+        h('label', { for: 'imodel' }, 'Picture model'), imodel,
+        h('p', { class: 'fine' }, 'For “make a picture of…”. Uses the Gemini keys set to Pictures first.'),
+        h('button', { class: 'primary', style: 'width:100%;margin-top:6px', onclick: (e) => act(e.target, outM, () => api('/api/settings', { model: model.value, image_model: imodel.value }), 'Saved.').then(() => paintKeys()) }, 'Save models'), outM)),
+    h('section', { class: 'bsec', id: 'limits' }, h('h2', { class: 'grouphead' }, 'Limits'),
+      h('div', { class: 'card' },
+        h('div', { class: 'row2' }, h('div', {}, h('label', { for: 'steps', style: 'margin-top:0' }, 'Max steps per job'), steps), h('div', {}, h('label', { for: 'mins', style: 'margin-top:0' }, 'Max minutes per job'), mins)),
+        h('label', { for: 'par' }, 'Jobs at the same time'), par,
+        h('p', { class: 'fine' }, 'Default 3. Free keys have per-minute limits, so more jobs at once can make each one slower.'),
+        h('button', { class: 'primary', style: 'width:100%;margin-top:6px', onclick: (e) => act(e.target, outL, () => api('/api/settings', { max_steps: steps.value, max_minutes: mins.value, max_parallel: par.value })) }, 'Save limits'), outL)),
+    h('p', { class: 'fine privacy' }, 'Privacy, honestly: what you ask, and the mail/file text a tool reads to answer you, goes to the AI provider of the key in use (Google for Gemini keys). On free tiers the provider may use it to improve its products. Your keys and tokens stay on your server.'));
+
+  let K = null; const testOut = {};
   async function paintKeys(data) {
     K = data || await api('/api/brain/keys');
-    keysCard.replaceChildren(
-      h('h3', {}, 'AI keys'),
-      h('p', { class: 'stat ' + (K.in_use ? 'ok' : 'no'), 'data-inuse': '1' }, K.in_use ? `In use now: ${K.in_use.name} (${K.in_use.model})` : (K.keys.some(k => k.active) ? 'Not used yet' : 'No active key yet — add one below')),
-      h('p', { class: 'fine' }, 'The assistant uses the first active key that works. If a key hits its free limit or fails, it moves to the next one by itself. Keys are stored encrypted on your server and never shown again.'),
-      h('div', { class: 'keys' }, K.keys.map((k, i) => keyItem(k, i))),
-      adding ? keyForm(null) : h('button', { class: 'primary', style: 'width:100%;margin-top:10px', 'data-addkey': '1', onclick: () => { adding = true; paintKeys(K); } }, '+ Add key'));
+    keysSec.replaceChildren(
+      h('div', { class: 'sechead' }, h('h2', { class: 'grouphead' }, 'AI keys'), h('button', { class: 'small primary', 'data-addkey': '1', onclick: () => openSheet(null) }, '+ Add key')),
+      h('p', { class: 'inuse ' + (K.in_use ? 'ok' : 'no'), 'data-inuse': '1' }, K.in_use ? `In use now: ${K.in_use.name} (${K.in_use.model})` : (K.keys.some(k => k.active) ? 'Not used yet' : 'No active key yet — tap “+ Add key”')),
+      K.keys.length ? h('div', { class: 'list keylist' }, K.keys.map((k, i) => keyRow(k, i))) : h('div', { class: 'list' }, h('p', { class: 'fine' }, 'No keys yet. A free Gemini key comes from aistudio.google.com/apikey.')),
+      h('p', { class: 'fine' }, 'Tap a key to edit, test or remove it. Each job goes to the first free key set for it (top to bottom); if none is free, another active key takes over.'));
+    whoSec.replaceChildren(h('h2', { class: 'grouphead' }, 'Who does what'),
+      h('div', { class: 'list who' }, whoDoesWhat(K.keys).map(([u, k, tagged]) => h('div', { class: 'item whoitem', 'data-who': u },
+        h('span', { class: 'setic', 'aria-hidden': 'true' }, USE_INFO[u][0]), h('div', { class: 'settext' }, h('span', { class: 'sett' }, USE_INFO[u][1]),
+          h('span', { class: 'sub whokey' + (k ? (tagged ? '' : ' warn') : ' err') }, k ? '→ ' + k.name + (tagged ? '' : ' (backup)') : 'no free key right now'))))),
+      h('p', { class: 'fine' }, '“Backup” = no free key is ticked for that job, so another active key does it.'));
   }
-  function statusOf(k) {
-    if (!k.active) return ['inactive', ''];
-    if (k.resting_until) return ['resting until ' + k.resting_until_text, 'warn'];
-    if (k.problem) return [k.problem, 'warn'];
-    if (k.in_use) return ['✓ in use', 'ok'];
-    if (k.last_ok) return ['✓ working', 'ok'];
-    return [k.has_key || k.kind === 'openai' ? 'not used yet' : 'no key saved', k.has_key ? '' : 'warn'];
+  function keyRow(k, i) {
+    const [st, cls] = keyStatus(k);
+    const problem = k.last_error && (k.problem || k.resting_until) ? 'Last error: ' + k.last_error + (k.last_error_at ? ' (' + ago(k.last_error_at) + ')' : '') : '';
+    return h('button', { type: 'button', class: 'keyitem' + (k.active ? '' : ' off'), 'data-key': k.id, onclick: () => openSheet(k) },
+      h('span', { class: 'knum' }, String(i + 1)),
+      h('span', { class: 'kbody' },
+        h('span', { class: 'kname' }, h('b', {}, k.name)),
+        h('span', { class: 'ksub' }, (k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible') + ' · ', h('span', { class: 'mono' }, k.effective_model || 'no model')),
+        h('span', { class: 'ktags' }, h('span', { class: 'pill ' + cls, 'data-status': k.id }, st),
+          k.use_for.length ? k.use_for.map(u => h('span', { class: 'tag', 'data-tag': u }, USE_SHORT[u])) : h('span', { class: 'tag none' }, 'Not used for anything')),
+        problem ? h('span', { class: 'fine kline' }, problem) : null),
+      h('span', { class: 'kside' }, h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
   }
-  function keyItem(k, i) {
-    const [st, cls] = statusOf(k);
-    const o = msgEl(); if (testOut[k.id]) say(o, testOut[k.id].message, testOut[k.id].ok);
-    const sw = h('input', { type: 'checkbox', 'aria-label': 'Active', 'data-active': k.id }); sw.checked = k.active;
-    sw.onchange = async () => { try { await api(`/api/brain/keys/${k.id}`, { active: sw.checked }); paintKeys(); } catch (e) { say(o, e.message); sw.checked = !sw.checked; } };
-    const line = [k.last_used ? 'Last used ' + ago(k.last_used) : 'Never used', k.last_error ? 'Last error: ' + k.last_error + (k.last_error_at ? ' (' + ago(k.last_error_at) + ')' : '') : ''].filter(Boolean).join(' · ');
-    const models = (testOut[k.id]?.models || []);
-    return h('div', { class: 'keyitem' + (k.active ? '' : ' off'), 'data-key': k.id },
-      h('div', { class: 'khead' }, h('div', { class: 'kname' }, h('span', { class: 'knum' }, String(i + 1)), h('b', {}, k.name)),
-        h('label', { class: 'kact' }, sw, h('span', {}, 'Active'))),
-      h('div', { class: 'kmeta' }, h('span', { class: 'pill' }, k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible'), ' ', h('span', { class: 'pill ' + cls, 'data-status': k.id }, st), ' ', h('span', { class: 'fine mono' }, k.effective_model || 'no model')),
-      h('p', { class: 'fine kline' }, line),
-      h('div', { class: 'row' },
-        h('button', { class: 'small', 'data-test': k.id, onclick: async (e) => { const x = await act(e.target, o, () => api(`/api/brain/keys/${k.id}/test`, {}), x => x.message); if (x) { testOut[k.id] = x; paintKeys(); } } }, 'Test'),
-        h('button', { class: 'small', 'data-edit': k.id, onclick: () => { open.has(k.id) ? open.delete(k.id) : open.add(k.id); paintKeys(K); } }, open.has(k.id) ? 'Close' : 'Edit'),
-        h('button', { class: 'small', 'aria-label': 'Move up', disabled: i === 0, onclick: async () => paintKeys({ ...K, keys: (await api(`/api/brain/keys/${k.id}/move`, { dir: 'up' })).keys }) }, '↑'),
-        h('button', { class: 'small', 'aria-label': 'Move down', disabled: i === K.keys.length - 1, onclick: async () => paintKeys({ ...K, keys: (await api(`/api/brain/keys/${k.id}/move`, { dir: 'down' })).keys }) }, '↓')),
-      o,
-      models.length ? h('div', {}, h('p', { class: 'fine' }, 'Models this key can use — tap one to choose it:'), h('div', { class: 'kmodels' }, models.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === k.effective_model ? ' on' : ''), 'data-model': m,
-        onclick: async () => { try { await api(`/api/brain/keys/${k.id}`, { model: m }); testOut[k.id] = { ok: true, message: `Model set to ${m}. Tap Test to check it.`, models }; paintKeys(); } catch (e) { say(o, e.message); } } }, m)))) : null,
-      open.has(k.id) ? keyForm(k) : null);
-  }
-  function keyForm(k) {
-    const isNew = !k; const o = msgEl();
+
+  // ----- the edit sheet -----
+  function closeSheet() { document.querySelector('.sheetback')?.remove(); document.body.classList.remove('noscroll'); }
+  function openSheet(k0) {
+    closeSheet();
+    const isNew = !k0; let k = k0;
+    const back = h('div', { class: 'sheetback', onclick: (e) => { if (e.target === back) closeSheet(); } });
+    const sheet = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': isNew ? 'Add key' : 'Edit key', 'data-sheet': isNew ? 'new' : k.id });
+    back.append(sheet); document.body.append(back); document.body.classList.add('noscroll');
+    const o = msgEl(), to = msgEl();
     const kname = h('input', { 'data-f': 'name', value: k ? k.name : '', placeholder: 'e.g. Gemini – project 2 (abish@…)' });
     const kind = h('select', { 'data-f': 'kind' }, h('option', { value: 'gemini' }, 'Gemini (Google)'), h('option', { value: 'groq' }, 'Groq (free, OpenAI-compatible)'), h('option', { value: 'openai' }, 'Other OpenAI-compatible'));
     kind.value = k ? (k.kind === 'openai' && k.base_url === K.groq.base_url ? 'groq' : k.kind) : 'gemini';
     const base = h('input', { 'data-f': 'base', value: k ? k.base_url : '', placeholder: 'https://…/v1', autocapitalize: 'off', spellcheck: 'false' });
     const kmodel = h('input', { 'data-f': 'model', value: k ? k.model : '', autocapitalize: 'off', spellcheck: 'false' });
     const kkey = h('input', { 'data-f': 'key', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: k && k.has_key ? 'saved — paste to replace' : 'paste the key' });
-    const act1 = h('input', { type: 'checkbox', 'data-f': 'active' }); act1.checked = k ? k.active : true;
+    const act1 = h('input', { type: 'checkbox', 'data-f': 'active', 'data-active': k ? k.id : 'new', id: 'kactive' }); act1.checked = k ? k.active : true;
+    if (k) act1.onchange = async () => { try { const x = await api(`/api/brain/keys/${k.id}`, { active: act1.checked }); k = x.key; paintKeys({ ...K, keys: x.keys }); say(o, act1.checked ? 'Switched on.' : 'Switched off.', true); } catch (e) { say(o, e.message); act1.checked = !act1.checked; } };
     const baseWrap = h('div', {}, h('label', {}, 'API base URL'), base);
     const help = h('p', { class: 'fine' });
+    const useBoxes = {};
+    const usesWrap = h('div', { class: 'uses' }, USE_ORDER.map(u => {
+      const cb = h('input', { type: 'checkbox', 'data-use': u, id: 'use-' + u }); useBoxes[u] = cb;
+      return h('label', { class: 'usebox', for: 'use-' + u }, cb, h('span', { class: 'useic', 'aria-hidden': 'true' }, USE_INFO[u][0]), h('span', {}, h('b', {}, USE_INFO[u][1]), h('small', {}, USE_INFO[u][2])));
+    }));
+    const defaultsFor = (v) => v === 'gemini' ? ['chat', 'pictures', 'media', 'background'] : ['chat', 'coding'];
+    const setUses = (list) => USE_ORDER.forEach(u => { useBoxes[u].checked = list.includes(u); });
+    setUses(k ? k.use_for : defaultsFor('gemini'));
     const sync = (fromUser) => {
       const v = kind.value; baseWrap.hidden = v !== 'openai';
       if (v === 'groq' && fromUser) { base.value = K.groq.base_url; if (!kmodel.value || isNew) kmodel.value = K.groq.model; }
       if (v === 'openai' && fromUser && base.value === K.groq.base_url) base.value = '';
+      if (fromUser && isNew) setUses(defaultsFor(v));
+      useBoxes.pictures.disabled = v !== 'gemini'; if (v !== 'gemini') useBoxes.pictures.checked = false;
       kmodel.placeholder = v === 'gemini' ? 'empty = default (' + (K.default_model || 'gemini-3.6-flash') + ')' : v === 'groq' ? K.groq.model : 'model name (tap Test to see the list)';
       help.replaceChildren(...(v === 'gemini' ? ['Get a free key: ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener' }, 'aistudio.google.com/apikey'), ' → Create API key. A key from another Google project has its own free limit.']
-        : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. Groq cannot hear voice notes or read PDFs.']
+        : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. Groq cannot hear voice notes, see photos or read PDFs.']
           : ['Any OpenAI-compatible API (OpenRouter, OpenAI, a local server…). Voice notes and PDFs need a Gemini key.']));
     };
     kind.onchange = () => sync(true); sync(isNew);
-    const save = async (e) => {
-      const b = { name: kname.value, kind: kind.value === 'gemini' ? 'gemini' : 'openai', model: kmodel.value, active: act1.checked };
+    const models = h('div', { class: 'kmodelswrap' });
+    const showModels = (list) => {
+      models.replaceChildren(...(list && list.length ? [h('p', { class: 'fine' }, 'Models this key can use — tap one to choose it:'), h('div', { class: 'kmodels' }, list.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === (kmodel.value || k?.effective_model) ? ' on' : ''), 'data-model': m,
+        onclick: async () => { kmodel.value = m; if (!isNew) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); say(to, `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } } showModels(list); } }, m)))] : []));
+    };
+    if (k && testOut[k.id]) { say(to, testOut[k.id].message, testOut[k.id].ok); showModels(testOut[k.id].models); }
+    const body = () => {
+      const b = { name: kname.value, kind: kind.value === 'gemini' ? 'gemini' : 'openai', model: kmodel.value, active: act1.checked, use_for: USE_ORDER.filter(u => useBoxes[u].checked) };
       if (kind.value !== 'gemini') b.base_url = kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value;
       if (kkey.value) b.key = kkey.value;
-      const x = await act(e.target, o, () => api(isNew ? '/api/brain/keys' : `/api/brain/keys/${k.id}`, b), 'Saved.');
-      if (x) { kkey.value = ''; if (isNew) adding = false; else open.delete(k.id); paintKeys({ ...K, keys: x.keys }); }
+      return b;
     };
-    return h('div', { class: 'kform', 'data-form': isNew ? 'new' : k.id },
-      isNew ? h('h3', { style: 'margin-top:4px' }, 'Add key') : null,
-      h('label', {}, 'Name / description'), kname,
-      h('label', {}, 'Type'), kind, help, baseWrap,
-      h('label', {}, 'Model'), kmodel,
-      h('label', {}, 'Key'), kkey,
-      h('div', { class: 'switch' }, h('span', {}, 'Active'), act1),
-      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', 'data-save': '1', onclick: save }, 'Save'),
-        isNew ? h('button', { onclick: () => { adding = false; paintKeys(K); } }, 'Cancel')
-          : h('button', { class: 'danger', 'data-remove': k.id, onclick: async (e) => { if (!confirm(`Remove the key "${k.name}"? It is deleted from your server.`)) return; const x = await act(e.target, o, () => api(`/api/brain/keys/${k.id}/delete`, {}), 'Removed.'); if (x) { open.delete(k.id); paintKeys(); } } }, 'Remove key')),
-      o);
+    const save = async (e) => {
+      const x = await act(e.target, o, () => api(isNew ? '/api/brain/keys' : `/api/brain/keys/${k.id}`, body()), 'Saved.');
+      if (x) { kkey.value = ''; await paintKeys({ ...K, keys: x.keys }); closeSheet(); }
+    };
+    const test = async (e) => {
+      if (isNew) return say(to, 'Save the key first, then tap Test.');
+      const x = await act(e.target, to, () => api(`/api/brain/keys/${k.id}/test`, {}), x => x.message);
+      if (x) { testOut[k.id] = x; showModels(x.models); if (x.key) { k = x.key; } paintKeys(); }
+    };
+    const idx = k ? K.keys.findIndex(x => x.id === k.id) : -1;
+    const move = (dir) => async () => { const x = await api(`/api/brain/keys/${k.id}/move`, { dir }); await paintKeys({ ...K, keys: x.keys }); openSheet(x.keys.find(y => y.id === k.id)); };
+    const [st, cls] = k ? keyStatus(k) : ['', ''];
+    sheet.append(
+      h('div', { class: 'sheethead' }, h('span', { class: 'grab', 'aria-hidden': 'true' }), h('h3', {}, isNew ? 'Add key' : k.name), h('button', { class: 'small sheetx', 'aria-label': 'Close', onclick: closeSheet }, '✕')),
+      h('div', { class: 'kform', 'data-form': isNew ? 'new' : k.id },
+        k ? h('div', { class: 'sheetstat' }, h('span', { class: 'pill ' + cls }, st), h('span', { class: 'fine' }, [k.last_used ? 'Last used ' + ago(k.last_used) : 'Never used', k.last_error ? 'Last error: ' + k.last_error : ''].filter(Boolean).join(' · '))) : null,
+        h('div', { class: 'switch' }, h('label', { for: 'kactive', style: 'margin:0;color:var(--text)' }, 'Active'), act1),
+        h('label', {}, 'Name / description'), kname,
+        h('label', {}, 'Type'), kind, help, baseWrap,
+        h('label', {}, 'Model'), kmodel, models,
+        h('label', {}, 'Key'), kkey,
+        h('label', {}, 'Use for'), usesWrap,
+        h('p', { class: 'fine' }, 'The assistant picks this key for the jobs ticked here. If it is busy or out of limit, another key takes over.'),
+        h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', 'data-save': '1', onclick: save }, isNew ? 'Add key' : 'Save'),
+          k ? h('button', { 'data-test': k.id, onclick: test }, 'Test') : null), o, to,
+        k ? h('div', { class: 'row', style: 'margin-top:4px' },
+          h('button', { class: 'small', 'aria-label': 'Move up', disabled: idx <= 0, onclick: move('up') }, '↑ Higher'),
+          h('button', { class: 'small', 'aria-label': 'Move down', disabled: idx === K.keys.length - 1, onclick: move('down') }, '↓ Lower')) : null,
+        k ? h('button', { class: 'danger', style: 'width:100%;margin-top:14px', 'data-remove': k.id, onclick: async (e) => { if (!confirm(`Remove the key "${k.name}"? It is deleted from your server.`)) return; const x = await act(e.target, o, () => api(`/api/brain/keys/${k.id}/delete`, {}), 'Removed.'); if (x) { closeSheet(); paintKeys(); } } }, 'Remove key') : null));
+    (isNew ? kname : sheet.querySelector('.sheetx')).focus?.({ preventScroll: true });
   }
-  try { await paintKeys(); } catch (e) { keysCard.append(h('p', { class: 'msg err' }, e.message)); }
+  window.addEventListener('hashchange', closeSheet, { once: true });
+  try { await paintKeys(); } catch (e) { keysSec.append(h('p', { class: 'msg err' }, e.message)); }
 }
 async function googleView(body) {
   const q = new URLSearchParams((location.hash.split('?')[1] || ''));
@@ -808,14 +909,30 @@ async function toolsView(body) {
   body.append(list);
 }
 function updateSourceCard(r) {
+  // 2.3.1: his own address first, then the repo's /docs on GitHub, then the release site (tried in order, automatically).
   const out = msgEl();
-  const kind = h('select', { id: 'usrc' }, h('option', { value: '' }, 'Default (' + String(r.default_source || '').replace(/^https:\/\//, '') + ')'), h('option', { value: 'gh' }, 'My GitHub repo'));
-  const repo = h('input', { id: 'urepo', value: r.repo || '', placeholder: 'owner/name', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' });
-  const repoBox = h('div', {}, h('label', { for: 'urepo' }, 'GitHub repo'), repo, h('p', { class: 'fine' }, 'Updates come from the repo\'s latest release (asset myassistant-latest.tar.gz + .sha256, checked before installing). A private repo needs a GitHub token saved on the Vault page as "github". See GITHUB.md in the app folder.'));
-  kind.value = r.repo ? 'gh' : ''; repoBox.style.display = r.repo ? '' : 'none';
-  kind.addEventListener('change', () => { repoBox.style.display = kind.value ? '' : 'none'; });
-  return h('div', { class: 'card' }, h('h3', {}, 'Update source'), h('label', { for: 'usrc' }, 'Get updates from'), kind, repoBox,
-    h('div', { style: 'margin-top:12px' }, h('button', { class: 'primary', style: 'width:100%', onclick: (e) => act(e.target, out, () => api('/api/settings', { update_repo: kind.value ? repo.value : '' }), 'Saved. Tap “Check now” to look for an update there.') }, 'Save')), out);
+  const lab = (u) => String(u || '').replace(/^https:\/\//, '');
+  const cur = r.repo ? 'legacy' : r.source ? 'custom' : 'default';
+  const kind = h('select', { id: 'usrc' },
+    h('option', { value: 'default' }, lab(r.source_default) + ' (default)'),
+    h('option', { value: 'custom' }, 'Another address'),
+    r.repo ? h('option', { value: 'legacy' }, 'GitHub latest release: ' + r.repo + ' (older mode)') : null);
+  kind.value = cur;
+  const link = h('input', { id: 'usrclink', value: cur === 'custom' ? r.source : '', placeholder: 'https://updates.example.com', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', inputmode: 'url' });
+  const linkBox = h('div', {}, h('label', { for: 'usrclink' }, 'Address'), link, h('p', { class: 'fine' }, 'A folder with version.json and myassistant-latest.tar.gz (+ .sha256). A GitHub repo link works too: its /docs folder is used.'));
+  const sync = () => { linkBox.hidden = kind.value !== 'custom'; };
+  kind.addEventListener('change', sync); sync();
+  const order = (r.sources || []).map((s, i) => h('li', {}, s, i === 0 ? h('span', { class: 'fine' }, ' — first') : null));
+  return h('div', { class: 'card', id: 'updsource' }, h('h3', {}, 'Update source'),
+    h('label', { for: 'usrc', style: 'margin-top:0' }, 'Get updates from'), kind, linkBox,
+    h('p', { class: 'fine' }, 'Tried in this order. If one can\'t be reached, the next is used, and the Activity log says so. Every download is checked with its .sha256 before installing.'),
+    h('ol', { class: 'fine srcorder', 'data-sources': '1' }, order),
+    r.checked_from ? h('p', { class: 'fine' }, 'Last check came from: ' + r.checked_from) : null,
+    h('div', { style: 'margin-top:12px' }, h('button', { class: 'primary', style: 'width:100%', 'data-save-source': '1', onclick: (e) => act(e.target, out, () => {
+      const v = kind.value;
+      if (v === 'legacy') return Promise.resolve({});
+      return api('/api/settings', { update_repo: '', update_source: v === 'default' ? '' : link.value });
+    }, 'Saved. Tap “Check now” to look for an update.').then(x => { if (x) setTimeout(route, 900); }) }, 'Save')), out);
 }
 async function updatesView(body) {
   const r = await api('/api/update'); const b = await api('/api/backups'); const s = await api('/api/settings'); const g = await api('/api/google');
@@ -831,7 +948,7 @@ async function updatesView(body) {
   const drive = h('select', { id: 'bdrive' }, h('option', { value: '' }, 'Off'), g.accounts.map(a => h('option', { value: a.email }, a.email))); drive.value = s.settings.backup_drive_account;
   body.append(h('div', { class: 'card' }, h('h3', {}, 'Version ' + r.current), updStat, updNotes,
     h('p', { class: 'fine' }, 'It checks for updates and tells you. It never updates itself: nothing changes until you tap Update now. Your data, keys and settings are kept.'),
-    h('div', { class: 'row' }, h('button', { onclick: (e) => act(e.target, out, () => api('/api/update/check', {}), x => { showUpdate(x); return x.newer ? `Version ${x.latest} is ready. Tap Update now.` : `You have the latest (${x.latest}).`; }) }, 'Check now'),
+    h('div', { class: 'row' }, h('button', { onclick: (e) => act(e.target, out, () => api('/api/update/check', {}), x => { showUpdate(x); const src = x.from ? ` (from ${x.from}${x.fell_back ? '; the first source didn\'t answer' : ''})` : ''; return (x.newer ? `Version ${x.latest} is ready. Tap Update now.` : `You have the latest (${x.latest}).`) + src; }) }, 'Check now'),
       updBtn), out,
     r.log ? h('details', {}, h('summary', { class: 'fine' }, 'Last update log'), h('pre', { class: 'mono', style: 'white-space:pre-wrap' }, r.log)) : null),
     updateSourceCard(r),

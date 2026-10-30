@@ -118,6 +118,7 @@ export const DEFAULTS = {
   email_channel: '0',
   email_account: '',
   update_url: '',                   // blank = <release base>/version.json
+  update_source: '',                // 2.3.1: blank = the default GitHub repo (falls back to the release site); 'site' = release site only
   backup_keep: '14',
   backup_drive_account: '',
   google_client_id: '',

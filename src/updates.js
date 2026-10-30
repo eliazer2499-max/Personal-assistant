@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { cfg, VERSION } from './config.js';
 import { setting, setSetting, audit, now, get } from './db.js';
-import { latestFromGithub } from './release-source.js';
+import { latestFromGithub, sourceList, findLatest, label } from './release-source.js';
 
 export function cmpVer(a, b) {
   const x = String(a).split('.').map(n => parseInt(n, 10) || 0), y = String(b).split('.').map(n => parseInt(n, 10) || 0);
@@ -13,6 +13,11 @@ export function cmpVer(a, b) {
 }
 export function updateRepo() { return String(setting('update_repo') || '').trim(); }
 export function updateUrl() { const repo = updateRepo(); return repo ? `https://github.com/${repo}/releases/latest` : (setting('update_url') || cfg.releaseBase + '/version.json'); }
+/** 2.3.1: where updates come from (Settings → Updates → Update source). */
+export function updateSources() {
+  const primary = setting('update_source') || (setting('update_url') || '').replace(/\/version\.json$/, '') || cfg.updateSource;
+  return sourceList(primary, [...cfg.updateFallbacks, cfg.releaseBase]);
+}
 async function githubToken() {
   try { const { platformToken } = await import('./tools/workspace.js'); return get("SELECT 1 AS x FROM platforms WHERE name='github'") ? platformToken('github').token : ''; } catch { return ''; }
 }
@@ -24,14 +29,20 @@ export async function checkUpdate(force = false) {
     const rel = await latestFromGithub(updateRepo(), await githubToken());
     j = { version: rel.version, notes: rel.notes };
   } else {
-    const r = await fetch(updateUrl(), { signal: AbortSignal.timeout(15000), headers: { 'Cache-Control': 'no-cache' } });
-    if (!r.ok) throw new Error('Update check failed: ' + r.status);
-    j = await r.json();
+    const list = updateSources();
+    let info;
+    try { info = await findLatest(list, VERSION); }
+    catch (e) { throw new Error('Update check failed: ' + e.message); }
+    const fellBack = info.base !== list[0];
+    if (info.skipped.length) audit('system', 'update.fallback', `Update check: ${info.skipped.join('; ')} — used ${label(info.base)}`);
+    setSetting('update_checked_from', label(info.base));
+    setSetting('update_from_base', info.base);
+    j = { version: info.version, notes: info.notes, source: label(info.base), fell_back: fellBack ? info.skipped.join('; ') || 'the first source was behind' : undefined };
   }
   const newer = cmpVer(j.version, VERSION) > 0;
   setSetting('update_available', newer ? j.version : '');
   setSetting('update_notes', newer ? String(j.notes || '').slice(0, 2000) : '');
-  return { current: VERSION, latest: j.version, newer, notes: j.notes || '' };
+  return { current: VERSION, latest: j.version, newer, notes: j.notes || '', from: j.source || undefined, fell_back: j.fell_back };
 }
 /** Runs only after the owner taps Update now. Starts the root-owned update unit (sudoers allows exactly this). */
 export function applyUpdate() {

@@ -9,7 +9,8 @@ Also fine: Google Cloud, AWS, Hetzner, DigitalOcean, or a PC at home*.
 
 2. Paste this one line and press Enter:
 
-   curl -fsSL https://abish-assistant-v2.sites.tab.bot/install.sh | sudo bash
+   curl -fsSL https://updates.personalassistance.soft-tech.net/install.sh | sudo bash
+   (if that address is not up yet: curl -fsSL https://abish-assistant-v2.sites.tab.bot/install.sh | sudo bash)
 
    It takes 3-6 minutes. At the end it prints your private address
    (like https://129-146-10-20.sslip.io) and a SETUP CODE.

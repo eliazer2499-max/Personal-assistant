@@ -9,10 +9,34 @@ export const GROQ_BASE = 'https://api.groq.com/openai/v1';
 export const GROQ_MODEL = 'openai/gpt-oss-120b';
 const SEC = (id) => 'ai_key_' + id;
 
+// 2.3.1: "Use for" — which jobs each key is picked for. The brain picks the first active, not-resting key
+// tagged for the job, in his order; when none is free it falls back to any active key.
+export const USES = ['chat', 'coding', 'pictures', 'media', 'background'];
+export const USE_LABELS = { chat: 'Chat', coding: 'Coding', pictures: 'Pictures', media: 'Voice, photos & files', background: 'Background jobs' };
+export function defaultUses(kind) { return kind === 'gemini' ? ['chat', 'pictures', 'media', 'background'] : ['chat', 'coding']; }
+export function usesOf(r) {
+  if (!r) return [];
+  if (r.use_for == null) return defaultUses(r.kind);
+  return String(r.use_for).split(',').filter(u => USES.includes(u));
+}
+function cleanUses(v, kind) {
+  if (v === undefined || v === null) return defaultUses(kind);
+  const arr = Array.isArray(v) ? v : String(v).split(',');
+  const bad = arr.map(String).filter(u => u && !USES.includes(u));
+  if (bad.length) throw httpErr(400, 'Unknown "Use for" choice: ' + bad.join(', '));
+  return USES.filter(u => arr.includes(u));       // stored in a fixed order
+}
+
 function ensureTable() {
   db.exec(`CREATE TABLE IF NOT EXISTS ai_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind TEXT, base_url TEXT, model TEXT,
     active INTEGER DEFAULT 1, position INTEGER, created INTEGER, last_used INTEGER, last_ok INTEGER, last_error TEXT, last_error_at INTEGER,
-    cool_until INTEGER DEFAULT 0, problem TEXT)`);
+    cool_until INTEGER DEFAULT 0, problem TEXT, use_for TEXT)`);
+  // 2.3.0 → 2.3.1: add "Use for"; keys that had none get the defaults for their type.
+  if (!all('PRAGMA table_info(ai_keys)').some(c => c.name === 'use_for')) {
+    db.exec('ALTER TABLE ai_keys ADD COLUMN use_for TEXT');
+    for (const r of all('SELECT id, kind FROM ai_keys')) run('UPDATE ai_keys SET use_for=? WHERE id=?', defaultUses(r.kind).join(','), r.id);
+    if (all('SELECT id FROM ai_keys').length) audit('system', 'brain.keys', '2.3.1: gave each AI key its default "Use for" (Gemini: chat, voice/photos/files, pictures, background; OpenAI-compatible: chat, coding)');
+  }
 }
 
 /** Carry the 2.2 settings over (runs on start and before every use; each part runs once). */
@@ -38,8 +62,8 @@ export function ensureKeys() {
 
 function insertKey(k, value) {
   const pos = (get('SELECT MAX(position) AS p FROM ai_keys').p ?? 0) + 1;
-  const r = run('INSERT INTO ai_keys(name,kind,base_url,model,active,position,created,cool_until) VALUES(?,?,?,?,?,?,?,0)',
-    k.name, k.kind, k.base_url || '', k.model || '', k.active ? 1 : 0, pos, now());
+  const r = run('INSERT INTO ai_keys(name,kind,base_url,model,active,position,created,cool_until,use_for) VALUES(?,?,?,?,?,?,?,0,?)',
+    k.name, k.kind, k.base_url || '', k.model || '', k.active ? 1 : 0, pos, now(), (k.use_for || defaultUses(k.kind)).join(','));
   const id = Number(r.lastInsertRowid);
   if (value) setSecret(SEC(id), String(value).trim());
   return id;
@@ -77,6 +101,7 @@ export function publicKey(r) {
     last_error: r.last_error || null, last_error_at: r.last_error_at || null, problem: r.problem || null,
     resting_until: r.cool_until > t ? r.cool_until : null, resting_until_text: r.cool_until > t ? clock(r.cool_until) : null,
     effective_model: r.model || (r.kind === 'gemini' ? setting('model') || DEFAULTS.model : ''),
+    use_for: usesOf(r),
     in_use: String(r.id) === setting('ai_key_in_use') };
 }
 export function listKeys() { return listRows().map(publicKey); }
@@ -84,7 +109,7 @@ export function listKeys() { return listRows().map(publicKey); }
 export function addKey(b) {
   ensureKeys();
   const kind = cleanKind(b.kind);
-  const k = { name: cleanName(b.name), kind, base_url: kind === 'openai' ? cleanBase(b.base_url) : '', model: cleanModel(b.model, kind), active: b.active === undefined ? 1 : (b.active ? 1 : 0) };
+  const k = { name: cleanName(b.name), kind, base_url: kind === 'openai' ? cleanBase(b.base_url) : '', model: cleanModel(b.model, kind), active: b.active === undefined ? 1 : (b.active ? 1 : 0), use_for: cleanUses(b.use_for, kind) };
   const value = String(b.key ?? '').trim();
   if (kind === 'gemini' && !value) throw httpErr(400, 'Paste the key (from aistudio.google.com/apikey)');
   const id = insertKey(k, value);
@@ -98,12 +123,15 @@ export function updateKey(id, b) {
   const base = kind === 'openai' ? (b.base_url !== undefined ? cleanBase(b.base_url) : (r.base_url || cleanBase(b.base_url))) : '';
   const model = b.model !== undefined ? cleanModel(b.model, kind) : r.model;
   const active = b.active !== undefined ? (b.active ? 1 : 0) : r.active;
+  const uses = b.use_for !== undefined ? cleanUses(b.use_for, kind) : usesOf(r);
+  const usesChanged = uses.join(',') !== usesOf(r).join(',');
   const changedSetup = kind !== r.kind || base !== (r.base_url || '') || model !== r.model || (b.key !== undefined && String(b.key).trim());
-  run('UPDATE ai_keys SET name=?, kind=?, base_url=?, model=?, active=? WHERE id=?', name, kind, base, model, active, r.id);
+  run('UPDATE ai_keys SET name=?, kind=?, base_url=?, model=?, active=?, use_for=? WHERE id=?', name, kind, base, model, active, uses.join(','), r.id);
   if (b.key !== undefined && String(b.key).trim()) setSecret(SEC(r.id), String(b.key).trim());
   if (changedSetup) run('UPDATE ai_keys SET problem=NULL, cool_until=0 WHERE id=?', r.id);    // fixed it? try again right away
   const what = [b.name !== undefined && name !== r.name ? 'renamed' : '', active !== r.active ? (active ? 'switched on' : 'switched off') : '',
-    b.key !== undefined && String(b.key).trim() ? 'key replaced' : '', model !== r.model ? 'model ' + model : ''].filter(Boolean).join(', ');
+    b.key !== undefined && String(b.key).trim() ? 'key replaced' : '', model !== r.model ? 'model ' + model : '',
+    usesChanged ? 'use for ' + (uses.map(u => USE_LABELS[u]).join(', ') || 'nothing') : ''].filter(Boolean).join(', ');
   audit('owner', 'brain.key_changed', `"${name}"${what ? ': ' + what : ''}`);
   return publicKey(keyRow(r.id));
 }
@@ -196,6 +224,7 @@ export function classify({ status = 0, text = '', headers = null, provider = 'ge
     const until = t + Math.min(Math.max(secs, 1), 24 * 3600) * 1000;
     return { kind: 'quota', reason: `${provider === 'gemini' ? 'Google free limit' : 'rate limit'} reached (429)${perDay ? ' for today' : ''} — ${secs > 90 ? 'until ~' + clock(until) : 'busy for ~' + Math.ceil(secs) + ' s'}`, until, perDay };
   }
+  if (status === 413) return { kind: 'other', reason: 'request too large for this key\'s limit (413)' + (msg ? ': ' + short(msg, 90) : ''), until: 0 };
   if (status === 401 || /API_KEY_INVALID|API key not valid|invalid[_ ]api[_ ]key|Incorrect API key|unregistered callers/i.test(text))
     return { kind: 'bad_key', reason: `bad key (${status || 401}) — paste a new one`, until: t + 30 * 60000, problem: 'bad key' };
   if (status === 403) return { kind: 'bad_key', reason: `key not allowed (403)${msg ? ': ' + short(msg, 90) : ''}`, until: t + 30 * 60000, problem: 'key not allowed' };
@@ -218,17 +247,25 @@ export function markFail(id, c, { fromTest = false } = {}) {
   run('UPDATE ai_keys SET last_error=?, last_error_at=?, cool_until=?, problem=? WHERE id=?', redact(c.reason).slice(0, 300), now(), c.until || 0, c.problem || null, id);
   if (!fromTest) run('UPDATE ai_keys SET last_used=? WHERE id=?', now(), id);
 }
-/** Keys the brain may use, in order. withMedia = the request carries a voice note or PDF: Gemini first. */
-export function usableKeys({ withMedia = false } = {}) {
+/**
+ * Keys the brain may use, in order. use = the kind of job (chat | coding | media | background): keys tagged
+ * for it come first (in his order), then every other active key as a fallback. withMedia = the request
+ * carries a voice note, photo or PDF: Gemini keys first in both groups (they can hear and see).
+ */
+export function usableKeys({ withMedia = false, use = null } = {}) {
   const rows = listRows().filter(r => r.active && (r.kind === 'openai' || hasSecret(SEC(r.id))));
-  if (!withMedia) return rows;
-  return [...rows.filter(r => r.kind === 'gemini'), ...rows.filter(r => r.kind !== 'gemini')];
+  const groups = use ? [rows.filter(r => usesOf(r).includes(use)), rows.filter(r => !usesOf(r).includes(use))] : [rows];
+  const out = [];
+  if (withMedia) { for (const g of groups) out.push(...g.filter(r => r.kind === 'gemini')); for (const g of groups) out.push(...g.filter(r => r.kind !== 'gemini')); }
+  else for (const g of groups) out.push(...g);
+  return out.map(r => ({ ...r, tagged: !use || usesOf(r).includes(use) }));
 }
-/** Gemini keys for picture creation (first active one that is not resting comes first). */
+/** Gemini keys for picture creation: tagged "Pictures" first, then the other Gemini keys; free ones before resting ones. */
 export function geminiKeys() {
   const t = now();
-  const rows = usableKeys().filter(r => r.kind === 'gemini');
-  return [...rows.filter(r => !(r.cool_until > t) && !r.problem), ...rows.filter(r => r.cool_until > t || r.problem)].map(r => ({ id: r.id, name: r.name, key: keyValue(r.id) }));
+  const rows = usableKeys({ use: 'pictures' }).filter(r => r.kind === 'gemini');
+  const free = (r) => !(r.cool_until > t) && !r.problem;
+  return [...rows.filter(r => free(r)), ...rows.filter(r => !free(r))].map(r => ({ id: r.id, name: r.name, key: keyValue(r.id), tagged: r.tagged }));
 }
 export function inUse() {
   const r = setting('ai_key_in_use') && get('SELECT * FROM ai_keys WHERE id=?', Number(setting('ai_key_in_use')));
@@ -236,6 +273,7 @@ export function inUse() {
 }
 export function statusSummary() {
   return listKeys().map(k => ({ name: k.name, type: k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible', model: k.effective_model, active: k.active, in_use: k.in_use,
+    use_for: k.use_for.map(u => USE_LABELS[u]),
     status: !k.active ? 'inactive' : k.resting_until ? 'resting until ' + k.resting_until_text : k.problem ? k.problem : k.last_ok ? 'working' : 'not used yet',
     last_error: k.last_error || undefined }));
 }

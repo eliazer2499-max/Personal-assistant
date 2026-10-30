@@ -187,3 +187,107 @@ ol.steps li{margin:8px 0}
 .kmodels .chip{font-size:13px;padding:5px 10px}
 .kmodels .chip.on{border-color:var(--accent);color:var(--accent)}
 .kform{border-top:1px solid var(--line);margin-top:10px;padding-top:6px}
+
+/* ===== 2.3.1 redesign: Settings + Brain, light theme, sent files ===== */
+.bar{background:var(--barbg,rgba(7,9,13,.96))}
+.grouphead{font-size:13px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:22px 4px 8px}
+.setpage .setgroup:first-of-type .grouphead{margin-top:16px}
+.sethero{display:flex;align-items:center;gap:12px;padding:6px 4px 2px}
+.sethero .logo{width:40px;height:40px}
+.sethero>div:nth-child(2){flex:1;min-width:0}
+.sethero b{font-size:18px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sethero .sub{font-size:13px;color:var(--muted)}
+.sethero .pill{text-decoration:none}
+.list a.setitem,.list .setitem,.list .whoitem{justify-content:flex-start;gap:12px;padding:12px 14px;min-height:60px}
+.setic{flex:none;width:34px;height:34px;border-radius:10px;background:var(--panel2);display:inline-flex;align-items:center;justify-content:center;font-size:18px}
+.settext{flex:1;min-width:0}
+.sett{display:block;font-weight:500}
+.settext .sub{overflow-wrap:anywhere}
+.setitem .dot{width:9px;height:9px;border-radius:50%;background:var(--danger);flex:none}
+.sechead{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sechead .grouphead{margin-bottom:8px}
+.sechead button{flex:none;margin-top:14px}
+.bsec:first-child .sechead .grouphead,.bsec:first-child .sechead button{margin-top:6px}
+.inuse{font-size:14px;margin:0 4px 10px}
+.inuse.ok{color:var(--ok)}.inuse.no{color:var(--warn)}
+.keylist{background:var(--panel)}
+.keylist .keyitem{all:unset;box-sizing:border-box;display:flex;align-items:flex-start;gap:10px;width:100%;padding:12px 12px 12px 14px;border-bottom:1px solid var(--line);cursor:pointer;color:var(--text);background:var(--panel);-webkit-tap-highlight-color:transparent}
+.keylist .keyitem:last-child{border-bottom:0}
+.keylist .keyitem:active{background:var(--panel2)}
+.keylist .keyitem:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.keylist .keyitem.off .kbody{opacity:.6}
+.keylist .knum{margin-top:1px}
+.kbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.kbody .kname b{font-weight:600;overflow-wrap:anywhere}
+.ksub{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ktags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.tag{font-size:11.5px;line-height:1;padding:4px 7px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--text);white-space:nowrap}
+.tag.none{color:var(--warn)}
+.kbody .kline{margin:2px 0 0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--warn)}
+.kside{flex:none;display:flex;align-items:center;align-self:center}
+.ktags .pill{font-size:11.5px;line-height:1;padding:4px 8px;white-space:nowrap}
+.pill.err{color:var(--danger);border-color:var(--danger)}
+.settext .whokey{color:var(--ok)}
+.settext .whokey.warn{color:var(--warn)}.settext .whokey.err{color:var(--danger)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.privacy{margin:6px 4px 0}
+/* bottom sheet */
+.sheetback{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;animation:fadein .15s}
+.sheet{width:100%;max-width:560px;max-height:90vh;max-height:90dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--panel);border:1px solid var(--line);border-bottom:0;border-radius:18px 18px 0 0;padding:6px 16px calc(env(safe-area-inset-bottom) + 18px);animation:slideup .2s ease-out}
+.sheethead{position:sticky;top:-6px;z-index:1;background:var(--panel);display:flex;align-items:center;gap:8px;padding:12px 0 8px;margin:0 0 4px;border-bottom:1px solid var(--line)}
+.sheethead h3{flex:1;margin:0;font-size:17px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sheethead .grab{position:absolute;top:2px;left:50%;width:38px;height:4px;margin-left:-19px;border-radius:2px;background:var(--line)}
+.sheetx{width:36px;padding:0;flex:none}
+.sheet .kform{border-top:0;margin-top:0;padding-top:4px}
+.sheetstat{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:6px 0 2px}
+.sheetstat .fine{font-size:13px;overflow-wrap:anywhere}
+.uses{display:grid;gap:6px}
+.usebox{display:flex;align-items:center;gap:10px;margin:0;padding:9px 10px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);color:var(--text);font-size:15px;cursor:pointer}
+.usebox input{width:auto;flex:none;transform:scale(1.25);margin:0 2px}
+.usebox:has(input:checked){border-color:var(--accent)}
+.usebox:has(input:disabled){opacity:.5}
+.usebox .useic{flex:none;width:22px;text-align:center}
+.usebox small{display:block;color:var(--muted);font-size:12.5px}
+.usebox b{font-weight:500}
+body.noscroll{overflow:hidden}
+@keyframes slideup{from{transform:translateY(40px);opacity:.4}to{transform:none;opacity:1}}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+@media (min-width:700px){.sheetback{align-items:center}.sheet{border-radius:18px;border-bottom:1px solid var(--line);max-height:86vh}}
+@media (prefers-reduced-motion:reduce){.sheet,.sheetback{animation:none}}
+/* segmented control */
+.seg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:3px;gap:3px}
+.seg button{flex:1;min-height:38px;border:0;border-radius:9px;background:transparent;font-size:14px;padding:6px}
+.seg button[aria-checked="true"]{background:var(--accent);color:#04121a;font-weight:600}
+/* files the assistant sent */
+.att-card{display:flex;flex-direction:column;gap:6px;background:rgba(127,127,127,.08);border-radius:12px;padding:8px 10px;max-width:min(300px,72vw)}
+.att-card audio{width:100%;height:40px}
+.att-card video{width:100%;max-height:320px;border-radius:10px;background:#000}
+.acname{overflow-wrap:anywhere;font-size:14px}.acname small{color:var(--muted)}
+.att-chip{display:flex;flex-direction:column;gap:2px}
+/* light theme: Auto follows the phone; Settings → General can force Light or Dark */
+:root[data-theme="light"]{--bg:#f3f5f8;--panel:#ffffff;--panel2:#eef2f6;--line:#d8dfe7;--text:#111a24;--muted:#5d6b7b;--accent:#0a8db0;--accent2:#077a96;--danger:#d63a3a;--warn:#9a6400;--me:#d3eff8;--ok:#13804f;--barbg:rgba(243,245,248,.96);color-scheme:light}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#f3f5f8;--panel:#ffffff;--panel2:#eef2f6;--line:#d8dfe7;--text:#111a24;--muted:#5d6b7b;--accent:#0a8db0;--accent2:#077a96;--danger:#d63a3a;--warn:#9a6400;--me:#d3eff8;--ok:#13804f;--barbg:rgba(243,245,248,.96);color-scheme:light}}
+:root[data-theme="dark"]{color-scheme:dark}
+:root[data-theme="light"] .job{background:#fbfcfd;border-color:#b9cbd8}
+:root[data-theme="light"] .card.ap{background:#fff8e6;border-color:#e3c77a}
+:root[data-theme="light"] .att-file,:root[data-theme="light"] .vp-btn{background:rgba(0,0,0,.06)}
+:root[data-theme="light"] .vp-bars i{background:rgba(17,26,36,.25)}
+:root[data-theme="light"] .bubble.owner .vp-time{color:#3d6676}
+:root[data-theme="light"] button.primary,:root[data-theme="light"] .send{color:#fff}
+:root[data-theme="light"] .seg button[aria-checked="true"]{color:#fff}
+:root[data-theme="light"] .sheetback{background:rgba(15,23,32,.35)}
+:root[data-theme="light"] .logo{box-shadow:none}
+@media (prefers-color-scheme:light){
+:root:not([data-theme="dark"]) .job{background:#fbfcfd;border-color:#b9cbd8}
+:root:not([data-theme="dark"]) .card.ap{background:#fff8e6;border-color:#e3c77a}
+:root:not([data-theme="dark"]) .att-file,:root:not([data-theme="dark"]) .vp-btn{background:rgba(0,0,0,.06)}
+:root:not([data-theme="dark"]) .vp-bars i{background:rgba(17,26,36,.25)}
+:root:not([data-theme="dark"]) .bubble.owner .vp-time{color:#3d6676}
+:root:not([data-theme="dark"]) button.primary,:root:not([data-theme="dark"]) .send{color:#fff}
+:root:not([data-theme="dark"]) .seg button[aria-checked="true"]{color:#fff}
+:root:not([data-theme="dark"]) .sheetback{background:rgba(15,23,32,.35)}
+:root:not([data-theme="dark"]) .logo{box-shadow:none}
+}
+
+.srcorder{margin:6px 0 0;padding-left:22px;overflow-wrap:anywhere}
+.srcorder li{margin:2px 0}
