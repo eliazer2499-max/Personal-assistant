@@ -1,0 +1,448 @@
+// WhatsApp Agent: Meta's WhatsApp Agent Platform (https://api.whatsapp.com/agent/v1), the "Agents" beta in
+// personal WhatsApp (Settings → Agents → Create an agent; agent chat → Chat info → API key).
+// We long-poll GET /updates (no public URL or webhook) and answer with POST /messages. Only the agent's
+// creator can chat with it, and Meta lets the agent send only to its creator.
+//
+// Protocol followed from the community Hermes plugin "whatsapp-agent-platform" by ahtishamdilawar
+// (github.com/ahtishamdilawar/hermes-whatsapp-agent-platform, reviewed commit 3a57b1d, client.py/adapter.py/state.py):
+//   auth      Authorization: Bearer <key> on every call (and on the media download)
+//   inbound   GET /updates?offset&timeout(0-25 s)&limit(1-100) → 200 {object:"whatsapp_agent_platform", entry[].changes[]
+//             {field:"messages", value:{messages[], statuses[], contacts[]}}, next_offset} or 204 (nothing new).
+//             Polling does not consume: we pass next_offset back unchanged and persist it after the page is handled.
+//   outbound  POST /messages {messaging_product:"whatsapp", to:"user:<id>", type:"text", text:{body}} → messages[0].id
+//             (text ≤ 4096 UTF-16 units; we split at 4000)
+//   read/typing POST /statuses {messaging_product, status:"read", message_id, typing_indicator:{type:"text"}} → success.
+//             Meta accepts it only for the creator's own messages (403/131005 otherwise): that is how the creator is confirmed.
+//   media in  GET /media/<id> → {url, mime_type, sha256 (hex), file_size}; GET url with the same Bearer, no redirects.
+//   media out POST /media multipart (messaging_product, type, file) → {id}; POST /messages {type:"image", image:{id, caption}}
+//   limits    per agent, rolling 60 s: messages 12, statuses 12, media 12, updates 15 (we poll ≤ 14/min).
+//   errors    401 or code 190 / 400+100 on /updates = bad key; 403/131005 not the creator; 409/1752041 another poller
+//             replaced ours; 429/130429 rate limited (Retry-After); 503 not accepted (retry); other 5xx = outcome
+//             unknown (never re-sent, it may have arrived).
+// The key lives in the Vault (platform "whatsapp-agent"), sealed like every other token; it is never logged or shown.
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { cfg } from '../config.js';
+import { get, run, setting, setSetting, audit, log, now, rememberSecret } from '../db.js';
+import { seal, unseal } from '../crypto.js';
+import { ownerSaid } from './inbound.js';
+import { addMessage } from '../notify.js';
+import { mainChatId } from '../chats.js';
+import * as files from '../files.js';
+
+export const CHANNEL = 'whatsapp_agent';
+export const VAULT_NAME = 'whatsapp-agent';
+const API_DEFAULT = 'https://api.whatsapp.com/agent/v1';
+const MEDIA_HOSTS = new Set(['lookaside.fbsbx.com']);
+const MEDIA_KINDS = ['image', 'video', 'audio', 'document', 'sticker'];
+const CHUNK = 4000;
+const CLOCK_SKEW = 120;               // s, comparing Meta timestamps with ours
+const CONFLICT_LIMIT = 3, CONFLICT_WINDOW = 10 * 60000;
+
+const base = () => (cfg.waAgentBase || API_DEFAULT).replace(/\/+$/, '');
+const WINDOW = () => cfg.waAgentWindowMs || 60000;
+const POLL_TIMEOUT = () => Math.max(0, Math.min(25, cfg.waAgentPollTimeout ?? 20));
+const MIN_INTERVAL = () => cfg.waAgentMinIntervalMs ?? Math.ceil(60000 / 14);
+const BACKOFF = () => cfg.waAgentBackoffMs || 2000;
+const CONFLICT_BACKOFF = () => cfg.waAgentConflictMs || 60000;
+
+// ---------------------------------------------------------------- key (Vault)
+export function apiKey() {
+  const r = get('SELECT token FROM platforms WHERE name=?', VAULT_NAME);
+  if (!r) return '';
+  try { const k = unseal(r.token); rememberSecret(k); return k; } catch { return ''; }
+}
+export const hasKey = () => !!get('SELECT 1 AS x FROM platforms WHERE name=?', VAULT_NAME);
+const fingerprint = (k) => crypto.createHash('sha256').update(k).digest('hex').slice(0, 16);
+
+export function saveKey(raw) {
+  const k = String(raw || '').trim();
+  if (!k) throw Object.assign(new Error('Paste the API key first.'), { status: 400 });
+  if (k.length < 10 || k.length > 1024 || /\s/.test(k)) throw Object.assign(new Error('That does not look like an agent API key. Copy it again from WhatsApp: agent chat → Chat info → API key.'), { status: 400 });
+  rememberSecret(k);
+  run(`INSERT INTO platforms(name,kind,base_url,extra,token,added) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET kind=excluded.kind, base_url='', token=excluded.token`,
+    VAULT_NAME, VAULT_NAME, '', null, seal(k), now());
+  audit('owner', 'vault.saved', VAULT_NAME);
+  keyChanged();
+}
+export function removeKey() {
+  run('DELETE FROM platforms WHERE name=?', VAULT_NAME);
+  audit('owner', 'vault.removed', VAULT_NAME);
+  keyChanged();
+}
+/** The Vault row changed (here or on the Vault page): reconnect with the new key. */
+export function keyChanged() { if (enabled()) start(); else stop(); }
+
+// A new key is a new agent cursor: fresh offset, creator re-confirmed, older backlog skipped.
+function resetIfNewKey(k) {
+  const fp = fingerprint(k);
+  if (setting('wa_agent_key_fp') === fp) return;
+  setSetting('wa_agent_key_fp', fp);
+  setSetting('wa_agent_offset', '0');
+  setSetting('wa_agent_creator', '');
+  setSetting('wa_agent_start_ts', String(Math.floor(Date.now() / 1000)));
+}
+
+// ---------------------------------------------------------------- state
+export const enabled = () => setting('wa_agent_enabled') === '1';
+const st = { state: 'off', error: '', since: 0 };
+function setState(state, error = '') {
+  if (st.state !== state || st.error !== error) { st.state = state; st.error = error; st.since = now(); }
+}
+export function status() {
+  const n = (k) => parseInt(setting(k), 10) || 0;
+  return {
+    enabled: enabled(), has_key: hasKey(), state: enabled() ? st.state : 'off', error: enabled() ? st.error : '',
+    creator_known: !!setting('wa_agent_creator'), last_in: n('wa_agent_last_in'), last_out: n('wa_agent_last_out'),
+    queued: queue.length, since: st.since,
+  };
+}
+export function setEnabled(on) {
+  setSetting('wa_agent_enabled', on ? '1' : '0');
+  audit('owner', 'wa_agent.' + (on ? 'enabled' : 'disabled'), '');
+  if (on) start(); else stop();
+  return status();
+}
+
+// ---------------------------------------------------------------- errors + HTTP
+class WaErr extends Error {
+  constructor(kind, message, o = {}) { super(message); this.kind = kind; this.status = o.status; this.code = o.code; this.retryAfter = o.retryAfter; }
+}
+function classify(status, body, action, retryAfterRaw) {
+  const code = typeof body?.error?.code === 'number' ? body.error.code : undefined;
+  const ra = retryAfterRaw != null && retryAfterRaw !== '' && isFinite(Number(retryAfterRaw)) ? Math.max(0, Number(retryAfterRaw)) : undefined;
+  const o = { status, code, retryAfter: ra };
+  const tag = `${action}: HTTP ${status}${code !== undefined ? ' code ' + code : ''}`;
+  if (status === 401 || code === 190) return new WaErr('auth', tag + ' (API key missing or rejected)', o);
+  if (status === 400 && code === 100 && action === 'updates') return new WaErr('auth', tag + ' (API key rejected)', o);
+  if (status === 403 || code === 131005) return new WaErr('not_creator', tag + ' (not the agent\'s creator)', o);
+  if (action === 'updates' && (status === 409 || code === 1752041)) return new WaErr('conflict', tag + ' (another program polled this key)', o);
+  if (status === 429 || code === 130429) return new WaErr('rate', tag + ' (rate limited)', o);
+  if (status === 503) return new WaErr('retry', tag + ' (not accepted, retry later)', o);
+  if (status >= 500) return new WaErr('ambiguous', tag + ' (server error, outcome unknown)', o);
+  if (action === 'media_get' && (code === 100 || status === 404 || status === 410)) return new WaErr('media_gone', tag + ' (file expired)', o);
+  return new WaErr('rejected', tag, o);
+}
+
+let stopCtrl = null;   // aborts in-flight calls when the channel is turned off
+async function request(method, path, action, { query, json, form, timeoutMs = 30000, write = false } = {}) {
+  const key = apiKey();
+  if (!key) throw new WaErr('auth', 'No API key saved');
+  const qs = query ? '?' + new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined && v !== null).map(([k, v]) => [k, String(v)])) : '';
+  const sc = stopCtrl;
+  const signals = [AbortSignal.timeout(timeoutMs)];
+  if (sc) signals.push(sc.signal);
+  let r;
+  try {
+    r = await fetch(base() + path + qs, {
+      method, redirect: 'error', signal: AbortSignal.any(signals),
+      headers: { Authorization: 'Bearer ' + key, Accept: 'application/json', ...(json ? { 'Content-Type': 'application/json' } : {}) },
+      body: json ? JSON.stringify(json) : form || undefined,
+    });
+  } catch (e) {
+    if (sc?.signal.aborted) throw new WaErr('stopped', action + ': stopped');
+    const c = e?.cause?.code || '';
+    if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET_BEFORE|UND_ERR_CONNECT/.test(c) || !write) throw new WaErr('retry', `${action}: could not reach WhatsApp (${e.name === 'TimeoutError' ? 'timed out' : c || e.name})`);
+    throw new WaErr('ambiguous', `${action}: connection lost, outcome unknown (${e.name === 'TimeoutError' ? 'timed out' : c || e.name})`);
+  }
+  if (r.status >= 400) {
+    let body = {}; try { body = JSON.parse((await r.text()).slice(0, 16384)); } catch {}
+    throw classify(r.status, body, action, r.headers.get('retry-after'));
+  }
+  return r;
+}
+
+// Rolling 60 s window, like the reference: a short burst goes through, it only waits when the window is full.
+class RateWindow {
+  constructor(limit) { this.limit = limit; this.stamps = []; }
+  prune(t) { const w = WINDOW(); while (this.stamps.length && t - this.stamps[0] >= w) this.stamps.shift(); }
+  delay() { const t = Date.now(); this.prune(t); return this.stamps.length < this.limit ? 0 : Math.max(0, WINDOW() - (t - this.stamps[0])); }
+  tryAcquire() { if (this.delay() > 0) return false; this.stamps.push(Date.now()); return true; }
+  async acquire() { for (;;) { const d = this.delay(); if (d <= 0) { this.stamps.push(Date.now()); return; } await sleep(d + 5); } }
+  penalize(sec) { const t = Date.now(); const fill = t - WINDOW() + Math.min(WINDOW(), Math.max(0, sec * 1000)); this.stamps = Array(this.limit).fill(fill); }
+}
+export const limits = { messages: new RateWindow(12), statuses: new RateWindow(12), media: new RateWindow(12) };
+const sleep = (ms, signal) => new Promise((res) => {
+  const t = setTimeout(res, ms);
+  if (signal) signal.addEventListener('abort', () => { clearTimeout(t); res(); }, { once: true });
+});
+
+// ---------------------------------------------------------------- API calls
+export async function getUpdates(offset, timeout) {
+  const r = await request('GET', '/updates', 'updates', { query: { offset, timeout, limit: 50 }, timeoutMs: (timeout + 15) * 1000 });
+  if (r.status === 204) return { next_offset: null, messages: [] };
+  let j; try { j = await r.json(); } catch { throw new WaErr('malformed', 'updates: body is not JSON'); }
+  if (!j || j.object !== 'whatsapp_agent_platform' || !Number.isInteger(j.next_offset)) throw new WaErr('malformed', 'updates: unexpected answer');
+  const messages = [];
+  for (const e of Array.isArray(j.entry) ? j.entry : []) for (const ch of Array.isArray(e?.changes) ? e.changes : []) {
+    if (ch?.field !== 'messages' || !ch.value) continue;
+    for (const m of Array.isArray(ch.value.messages) ? ch.value.messages : []) if (m && typeof m === 'object') messages.push(m);
+  }
+  return { next_offset: j.next_offset, messages };
+}
+async function postMessage(payload) {
+  await limits.messages.acquire();
+  let r;
+  try { r = await request('POST', '/messages', 'send', { json: { messaging_product: 'whatsapp', ...payload }, timeoutMs: 60000, write: true }); }
+  catch (e) { if (e.kind === 'rate') limits.messages.penalize(e.retryAfter ?? 10); throw e; }
+  const j = await r.json().catch(() => ({}));
+  const id = j?.messages?.[0]?.id;
+  if (typeof id !== 'string' || !id) throw new WaErr('malformed', 'send: answer without a message id');
+  return id;
+}
+export async function markRead(wamid, typing = true) {
+  if (!limits.statuses.tryAcquire()) throw new WaErr('rate', 'statuses: local budget used up');
+  const body = { messaging_product: 'whatsapp', status: 'read', message_id: wamid };
+  if (typing) body.typing_indicator = { type: 'text' };
+  const r = await request('POST', '/statuses', 'statuses', { json: body, write: true });
+  const j = await r.json().catch(() => ({}));
+  if (j?.success !== true) throw new WaErr('malformed', 'statuses: answer without success');
+}
+async function uploadMedia(buf, mime, name) {
+  await limits.media.acquire();
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', mime);
+  form.append('file', new Blob([buf], { type: mime }), name);
+  const r = await request('POST', '/media', 'media_upload', { form, timeoutMs: 60000, write: true });
+  const j = await r.json().catch(() => ({}));
+  if (typeof j?.id !== 'string' || !j.id) throw new WaErr('malformed', 'media_upload: answer without id');
+  return j.id;
+}
+
+const MEDIA_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function trustedMediaUrl(raw) {
+  let u; try { u = new URL(String(raw)); } catch { throw new WaErr('media', 'the file link was malformed'); }
+  const b = new URL(base());
+  const sameAsApi = u.origin === b.origin;                       // the API host itself (also how tests serve files)
+  const allowed = (u.protocol === 'https:' && !u.username && !u.password && (u.port === '' || u.port === '443') && MEDIA_HOSTS.has(u.hostname)) || sameAsApi;
+  if (!allowed) throw new WaErr('media', 'the file link pointed somewhere unexpected');
+  return u;
+}
+function parseSha(v) {
+  const s = String(v || '').trim();
+  if (/^[0-9a-f]{64}$/i.test(s)) return Buffer.from(s, 'hex');
+  try { const b = Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64'); return b.length === 32 ? b : null; } catch { return null; }
+}
+/** Download one inbound file into the upload store (same limits as the web paperclip). */
+export async function fetchMedia(obj, type) {
+  if (!MEDIA_ID.test(String(obj?.id || ''))) throw new WaErr('media', 'the file id was malformed');
+  const name0 = obj.filename || (type === 'audio' ? (obj.voice ? 'voice-note' : 'audio') : type === 'image' ? 'photo' : type);
+  const ext = { 'audio/ogg': '.ogg', 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'application/pdf': '.pdf', 'audio/mpeg': '.mp3', 'audio/mp4': '.m4a', 'audio/aac': '.aac' };
+  let mime = String(obj.mime_type || '').split(';')[0].trim().toLowerCase();
+  const name = /\.[a-z0-9]{1,5}$/i.test(name0) ? name0 : name0 + (ext[mime] || '');
+  files.pickMime(mime, name);                     // throws 415 for kinds the brain cannot use (video, zip, …) before downloading
+  await limits.media.acquire();
+  const r = await request('GET', '/media/' + obj.id, 'media_get', {});
+  const info = await r.json().catch(() => ({}));
+  if (typeof info?.url !== 'string') throw new WaErr('media', 'WhatsApp did not give a file link');
+  if (Number.isInteger(info.file_size) && info.file_size > files.MAX_FILE) throw Object.assign(new Error('File too large (max 20 MB)'), { status: 413 });
+  const url = trustedMediaUrl(info.url);
+  const key = apiKey();
+  let d;
+  try { d = await fetch(url, { headers: { Authorization: 'Bearer ' + key, 'Accept-Encoding': 'identity' }, redirect: 'manual', signal: AbortSignal.timeout(90000) }); }
+  catch (e) { throw new WaErr('retry', 'download: ' + (e.name === 'TimeoutError' ? 'timed out' : 'could not connect')); }
+  if (d.status >= 300 && d.status < 400) throw new WaErr('media', 'download: redirect refused');
+  if (d.status === 404 || d.status === 410) throw new WaErr('media_gone', 'the file has expired on WhatsApp');
+  if (d.status !== 200) throw new WaErr('media', 'download: HTTP ' + d.status);
+  const chunks = []; let size = 0;
+  for await (const c of d.body) { size += c.length; if (size > files.MAX_FILE) throw Object.assign(new Error('File too large (max 20 MB)'), { status: 413 }); chunks.push(c); }
+  const buf = Buffer.concat(chunks);
+  const digest = crypto.createHash('sha256').update(buf).digest();
+  for (const want of [info.sha256, obj.sha256].filter(Boolean).map(parseSha)) if (want && !crypto.timingSafeEqual(digest, want)) throw new WaErr('media', 'the file arrived damaged (checksum mismatch)');
+  if (info.mime_type) mime = String(info.mime_type).split(';')[0].trim().toLowerCase();
+  return files.saveUpload(buf, mime, name, mainChatId());
+}
+
+// ---------------------------------------------------------------- outbound queue (12/min, one at a time)
+const queue = [];
+let draining = false;
+function enqueue(item) { return new Promise((resolve, reject) => { queue.push({ ...item, resolve, reject, tries: 0 }); drain(); }); }
+async function drain() {
+  if (draining) return;
+  draining = true;
+  try {
+    while (queue.length) {
+      const it = queue[0];
+      try {
+        let id;
+        if (it.type === 'file') {
+          const mediaId = await uploadMedia(it.buf, it.mime, it.name);
+          const kind = /^image\/(jpeg|png)$/.test(it.mime) ? 'image' : 'document';
+          id = await postMessage({ to: it.to, type: kind, [kind]: kind === 'document' ? { id: mediaId, filename: it.name } : { id: mediaId } });
+        } else id = await postMessage({ to: it.to, type: 'text', text: { body: it.text } });
+        queue.shift();
+        setSetting('wa_agent_last_out', String(now()));
+        it.resolve(id);
+      } catch (e) {
+        // Rate limit / 503 / no connection: certainly not sent, so it is safe to try again after a pause.
+        if ((e.kind === 'rate' || e.kind === 'retry') && it.tries < 5 && enabled()) {
+          it.tries++;
+          await sleep(e.kind === 'rate' ? 0 : Math.min(30000, BACKOFF() * 2 ** it.tries));
+          continue;
+        }
+        queue.shift();
+        if (e.kind === 'auth') setState('error', BAD_KEY);
+        it.reject(e.kind === 'ambiguous' ? Object.assign(new Error('WhatsApp did not confirm one message (it may or may not have arrived); not re-sent to avoid a duplicate'), { kind: e.kind }) : e);
+      }
+    }
+  } finally { draining = false; }
+}
+function rejectQueue(why) { while (queue.length) queue.shift().reject(new Error(why)); }
+
+/** WhatsApp's own formatting: **bold** → *bold*, no markdown headings. */
+export function toWhatsApp(text) {
+  return String(text).replace(/\*\*(.+?)\*\*/g, '*$1*').replace(/^#{1,6}\s+/gm, '');
+}
+/** Split into ≤ 4000-unit messages, at a paragraph, line or word break when possible. */
+export function splitText(text, max = CHUNK) {
+  const out = []; let s = String(text);
+  while (s.length > max) {
+    let cut = s.lastIndexOf('\n\n', max); if (cut < max * 0.5) cut = s.lastIndexOf('\n', max); if (cut < max * 0.5) cut = s.lastIndexOf(' ', max); if (cut < max * 0.5) cut = max;
+    if (/[\uD800-\uDBFF]/.test(s[cut - 1])) cut--;              // never split an emoji in half
+    out.push(s.slice(0, cut).trimEnd()); s = s.slice(cut).replace(/^\s+/, '');
+  }
+  if (s.trim()) out.push(s);
+  return out.length ? out : [];
+}
+
+/** Send to the owner's agent chat. opts: { wait, files: [file rows] }. Without wait it returns at once (queued). */
+export async function sendOwner(text, opts = {}) {
+  if (!enabled()) throw new Error('WhatsApp Agent is turned off');
+  if (!hasKey()) throw new Error('No WhatsApp Agent key saved');
+  const to = setting('wa_agent_creator');
+  if (!to) throw new Error('Send your WhatsApp agent one message first, so I know your chat');
+  const jobs = splitText(toWhatsApp(text)).map(c => enqueue({ type: 'text', to, text: c }));
+  for (const f of opts.files || []) {
+    try { jobs.push(enqueue({ type: 'file', to, buf: fs.readFileSync(files.filePath(f)), mime: f.mime, name: f.name })); } catch (e) { log('wa agent: file not sent', e.message); }
+  }
+  const done = Promise.all(jobs);
+  if (opts.wait) { await done; return true; }
+  done.catch(e => { log('wa agent send failed', e.message); addMessage('notice', 'web', 'Could not deliver to WhatsApp: ' + e.message); });
+  return true;
+}
+
+// ---------------------------------------------------------------- inbound
+const isSeen = (wamid) => !!get('SELECT 1 AS x FROM seen WHERE id=?', 'waa:' + wamid);
+const markSeen = (wamid) => { try { run('INSERT INTO seen(id,ts) VALUES(?,?)', 'waa:' + wamid, now()); } catch {} };
+
+async function authorize(from, wamid) {
+  const creator = setting('wa_agent_creator');
+  if (creator && from === creator) { markRead(wamid, true).catch(() => {}); return true; }
+  try { await markRead(wamid, true); }
+  catch (e) {
+    if (e.kind === 'not_creator') return false;
+    if (e.kind === 'retry' || e.kind === 'rate' || e.kind === 'ambiguous') throw e;   // can't confirm now: re-poll this page
+    return false;
+  }
+  setSetting('wa_agent_creator', from);
+  audit('system', creator ? 'wa_agent.creator_changed' : 'wa_agent.creator_confirmed', 'confirmed by WhatsApp');
+  return true;
+}
+
+const LABEL = { image: 'photo', video: 'video', audio: 'audio', document: 'file', sticker: 'sticker' };
+async function handleInbound(m) {
+  const wamid = m.id, from = m.from, type = m.type;
+  if (typeof wamid !== 'string' || !wamid || typeof from !== 'string' || !/^user:\S+$/.test(from)) return;
+  if (isSeen(wamid)) return;                                         // dedupe across restarts and replays
+  const ts = parseInt(m.timestamp, 10);
+  const startTs = parseInt(setting('wa_agent_start_ts'), 10) || 0;
+  if (ts && ts < startTs - CLOCK_SKEW) { markSeen(wamid); return; }   // backlog from before it was first turned on
+  if (type === 'reaction') { markSeen(wamid); return; }
+  if (!(await authorize(from, wamid))) { markSeen(wamid); log('wa agent: dropped a message from someone who is not the agent\'s creator'); return; }
+  markSeen(wamid);
+  setSetting('wa_agent_last_in', String(now()));
+  const meta = { waa_wamid: wamid };
+  if (type === 'text') {
+    const t = typeof m.text?.body === 'string' ? m.text.body : '';
+    const reply = await ownerSaid(CHANNEL, t, meta);
+    if (reply) await sendOwner(reply).catch(e => log('wa agent reply', e.message));
+    return;
+  }
+  if (MEDIA_KINDS.includes(type)) {
+    const obj = m[type] || {};
+    const caption = typeof obj.caption === 'string' ? obj.caption : '';
+    let row = null, problem = '';
+    try { row = await fetchMedia(obj, type); }
+    catch (e) {
+      if (e.status === 415) problem = `I can't open a ${LABEL[type]} like that here. Photos, voice notes, PDF, Word and text files work.`;
+      else if (e.status === 413) problem = `That ${LABEL[type]} is too big for me (max 20 MB).`;
+      else problem = `I couldn't download that ${LABEL[type]} from WhatsApp (${e.message}). Please send it again.`;
+      log('wa agent media', type, e.message);
+    }
+    if (row) { await ownerSaid(CHANNEL, caption, meta, [row.id]); return; }
+    if (caption) { await ownerSaid(CHANNEL, caption + `\n\n[He also sent a ${LABEL[type]} on WhatsApp that could not be opened: ${problem}]`, meta); return; }
+    addMessage('owner', CHANNEL, `(${LABEL[type]})`);
+    addMessage('notice', CHANNEL, problem);
+    await sendOwner(problem).catch(() => {});
+    return;
+  }
+  addMessage('owner', CHANNEL, `(${type || 'message'})`);
+  await sendOwner('I can read text, voice notes, photos and files here.').catch(() => {});
+}
+
+// ---------------------------------------------------------------- the long-poll worker
+const BAD_KEY = 'WhatsApp rejected the API key. In WhatsApp open your agent\'s chat → Chat info → API key, copy it again and paste it here.';
+let gen = 0;
+export const running = () => !!stopCtrl;
+
+export function start() {
+  stop(true);
+  if (!enabled()) { setState('off'); return false; }
+  const key = apiKey();
+  if (!key) { setState('error', 'No API key saved yet. Paste it below (WhatsApp → agent chat → Chat info → API key).'); return false; }
+  resetIfNewKey(key);
+  const my = ++gen;
+  stopCtrl = new AbortController();
+  setState('connecting');
+  loop(my, stopCtrl.signal).catch(e => { log('wa agent loop crashed', e.message); if (gen === my) setState('error', 'Stopped after an internal error; turn it off and on.'); });
+  return true;
+}
+export function stop(silent = false) {
+  gen++;
+  if (stopCtrl) { stopCtrl.abort(); stopCtrl = null; }
+  if (!silent) { setState('off'); rejectQueue('WhatsApp Agent was turned off'); }
+}
+
+async function loop(my, signal) {
+  let failures = 0, lastPoll = 0, first = true;
+  const conflicts = [];
+  while (gen === my) {
+    const wait = MIN_INTERVAL() - (Date.now() - lastPoll);
+    if (wait > 0) await sleep(wait, signal);
+    if (gen !== my) return;
+    lastPoll = Date.now();
+    try {
+      const offset = parseInt(setting('wa_agent_offset'), 10) || 0;
+      const u = await getUpdates(offset, first ? 0 : POLL_TIMEOUT());
+      if (gen !== my) return;
+      first = false;
+      setState('connected');
+      if (u.next_offset !== null) {
+        for (const m of u.messages) {
+          try { await handleInbound(m); }
+          catch (e) { if (e instanceof WaErr && ['retry', 'rate', 'ambiguous'].includes(e.kind)) throw e; log('wa agent: skipped one message', e.message); }
+        }
+        if (gen !== my) return;
+        setSetting('wa_agent_offset', String(u.next_offset));   // persisted: a restart continues here, no replay
+      }
+      failures = 0;
+    } catch (e) {
+      if (gen !== my || e.kind === 'stopped') return;
+      if (e.kind === 'auth') { setState('error', BAD_KEY); log('wa agent: polling stopped,', e.message); audit('system', 'wa_agent.bad_key', e.message); stopCtrl = null; return; }
+      if (e.kind === 'conflict') {
+        const t = Date.now(); conflicts.push(t); while (conflicts.length && t - conflicts[0] > CONFLICT_WINDOW) conflicts.shift();
+        if (conflicts.length >= CONFLICT_LIMIT) { setState('error', 'Another program is using this agent\'s API key (only one can listen at a time). Stop the other one, then turn this off and on.'); stopCtrl = null; return; }
+        setState('connecting', 'Another program asked WhatsApp with this key; trying again in a minute.');
+        await sleep(CONFLICT_BACKOFF(), signal);
+        continue;
+      }
+      failures++;
+      let delay = Math.min(60000, BACKOFF() * 2 ** Math.min(failures - 1, 5));
+      if (e.kind === 'rate' && e.retryAfter != null) delay = Math.max(delay, Math.min(60000, e.retryAfter * 1000));
+      setState('connecting', `Reconnecting (${String(e.message).slice(0, 120)})`);
+      log('wa agent: poll failed,', e.message, '- retrying in', Math.round(delay / 1000) + 's');
+      await sleep(delay, signal);
+    }
+  }
+}

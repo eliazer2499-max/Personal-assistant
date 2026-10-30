@@ -1,0 +1,99 @@
+MY ASSISTANT v2 — SETUP (about 30 minutes, once)
+=================================================
+
+You need: any Ubuntu 22.04/24.04 (or Debian 12) server with a public IP.
+Free option: Oracle Cloud "Always Free" (steps in section A below).
+Also fine: Google Cloud, AWS, Hetzner, DigitalOcean, or a PC at home*.
+
+1. Get a server and log into it (Oracle: section A, steps A1-A5).
+
+2. Paste this one line and press Enter:
+
+   curl -fsSL https://abish-assistant-v2.sites.tab.bot/install.sh | sudo bash
+
+   It takes 3-6 minutes. At the end it prints your private address
+   (like https://129-146-10-20.sslip.io) and a SETUP CODE.
+
+3. Open that address on your phone. Enter the setup code, choose a
+   password, then add it to an authenticator app (Google Authenticator,
+   Microsoft Authenticator, or iPhone Passwords) and type the 6-digit
+   code. Screenshot the 8 backup codes.
+
+4. Settings > Brain (AI model) > AI keys > + Add key: name it, Type
+   Gemini, paste your free key from aistudio.google.com/apikey > Save >
+   Test. Add more keys (other Google projects, Groq) as backups.
+
+5. Settings > Google accounts: do the one-time Google setup the page
+   shows (create a Google Cloud project, switch on the APIs, choose
+   "External", add yourself as a test user, then PUBLISH the app so
+   sign-ins don't expire every 7 days, create a "Web" client with the
+   redirect address the page shows, paste the ID + secret).
+   Then tap "Add Google account" once for each Gmail account.
+
+6. Optional, any time (Settings > Channels):
+   - WhatsApp Agent (2.2): in WhatsApp, Settings > Agents > Create an agent;
+     open the agent's chat > Chat info > API key; paste it in the WhatsApp
+     Agent card, Save key, turn on Enabled, then send the agent a message.
+   - Telegram: paste a @BotFather token, tap the pairing link. (Easiest.)
+   - Email: switch on, then email yourself with subject "AI: ...".
+   - Text/SMS: install "SMS Gateway for Android" on a spare Android
+     phone, turn on Cloud server, paste its username/password.
+   - WhatsApp: needs a Meta developer app + a number Meta verifies
+     by code. The page lists every tap.
+   Servers page: copy the assistant's key into each server's
+   ~/.ssh/authorized_keys, add the server, tap Test.
+   More > Vault: GitHub / Cloudflare tokens, so it can publish sites.
+
+That's it. Ask it anything in Chat. Anything that emails other people,
+deletes, spends, changes a server or publishes waits for your YES.
+
+
+A. IF YOU USE ORACLE CLOUD (free "Always Free" server)
+------------------------------------------------------
+A1. Sign up at oracle.com/cloud/free ("Start for free"). It asks for a
+    card to verify you; Always Free resources are not charged. Pick a
+    home region near you (it can't be changed later).
+
+A2. Open Cloud Shell (the >_ icon at the top of the Oracle console; it
+    works in a phone browser too) and make a login key:
+       ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 && cat ~/.ssh/id_ed25519.pub
+    Copy the line it prints (starts with ssh-ed25519).
+
+A3. Menu > Compute > Instances > Create instance:
+    - Image: Change image > Canonical Ubuntu 24.04 (or 22.04).
+    - Shape: Change shape > Ampere > VM.Standard.A1.Flex, 2 OCPU, 12 GB
+      (free). If it says "out of capacity", try another availability
+      domain or try again later. VM.Standard.E2.1.Micro also works but
+      is slow (1 GB memory).
+    - Networking: keep "Create new virtual cloud network", public
+      subnet, and "Assign a public IPv4 address".
+    - SSH keys: "Paste public keys" > paste the line from A2.
+    - Create. Copy the Public IP address when it's Running.
+
+A4. Open the web ports (the installer can't do this part):
+    On the instance page click the Subnet link > Security Lists >
+    Default Security List > Add Ingress Rules:
+       Source CIDR 0.0.0.0/0, IP Protocol TCP, Destination Port Range 80
+    Add another the same with port 443. (The installer opens the
+    server's own firewall, which Oracle's Ubuntu blocks by default.)
+
+A5. Back in Cloud Shell:   ssh ubuntu@YOUR_PUBLIC_IP
+    Then do step 2 (the one line).
+
+Other clouds: allow inbound TCP 80 and 443 in the provider's firewall.
+* Home PC: it needs ports 80/443 forwarded from your router (or a free
+  Cloudflare Tunnel) so Telegram/WhatsApp/SMS messages can reach it.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+- Page doesn't open: ports 80/443 not open (A4), or wait 1-2 minutes
+  for the HTTPS certificate. On the server: sudo myassistant status
+- Lost the setup code:      sudo myassistant setup-code
+- Lost your phone/2-step:   use a backup code, or: sudo myassistant reset-login
+- See errors:               sudo myassistant logs
+- Google says the redirect address is not allowed: use a domain you own
+  (point an A record at the server) and re-run step 2 with
+     curl -fsSL https://abish-assistant-v2.sites.tab.bot/install.sh | sudo MA_DOMAIN=ai.yourdomain.com bash
+- Remove it:  sudo bash /opt/myassistant/current/uninstall.sh  (keeps data;
+  add --purge to delete everything)
