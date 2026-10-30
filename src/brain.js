@@ -25,13 +25,24 @@ function geminiSchema(s) {
   if (Array.isArray(o.required) && !o.required.length) delete o.required;
   return o;
 }
-function toGeminiContents(items) {
+// 2.3.2: media this model's Test showed it can't take becomes a short note instead (so the request still works).
+const CAP_OF = { image: 'images', audio: 'audio', pdf: 'pdf' };
+const mediaLabel = (m) => `"${m.name}" (${m.kind === 'audio' ? 'voice note' : m.kind === 'image' ? 'photo' : m.kind})`;
+function splitMedia(media, caps) {
+  const keep = [], skipped = [];
+  for (const m of media || []) (caps && caps[CAP_OF[m.kind]] === false ? skipped : keep).push(m);
+  return { keep, skipped };
+}
+const capsNote = (skipped) => skipped.length ? `[The owner attached ${skipped.map(mediaLabel).join(', ')}, but this AI model cannot open that kind of file (its Test showed it). Tell him to send it again when a key that can (see Settings → Brain → AI keys) is free.]` : '';
+function toGeminiContents(items, caps = null) {
   const out = [];
   for (const it of items) {
     if (it.role === 'user') {
       // Photos, voice notes and PDFs go to Gemini directly (inlineData), so it sees / hears them itself.
-      const parts = (it.media || []).map(m => ({ inlineData: { mimeType: geminiMime(m.mime), data: m.data } }));
-      parts.push({ text: it.text || (parts.length ? '(attachment)' : '…') });
+      const { keep, skipped } = splitMedia(it.media, caps);
+      const parts = keep.map(m => ({ inlineData: { mimeType: geminiMime(m.mime), data: m.data } }));
+      const note = capsNote(skipped);
+      parts.push({ text: [it.text, note].filter(Boolean).join('\n\n') || (parts.length ? '(attachment)' : '…') });
       out.push({ role: 'user', parts });
     }
     else if (it.role === 'assistant') {
@@ -84,10 +95,10 @@ export async function geminiModels(key) {
   return (j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent')).map(m => m.name.replace(/^models\//, ''));
 }
 
-async function gemini({ system, items, tools, noTools, model, key, retried }) {
+async function gemini({ system, items, tools, noTools, model, key, retried, caps }) {
   if (!key) throw keyFail({ kind: 'bad_key', reason: 'no key saved — paste it', until: 0, problem: 'no key' });
   model = model || setting('model') || 'gemini-3.6-flash';
-  const body = { systemInstruction: { parts: [{ text: system }] }, contents: toGeminiContents(items) };
+  const body = { systemInstruction: { parts: [{ text: system }] }, contents: toGeminiContents(items, caps) };
   if (tools && tools.length) {
     body.tools = [{ functionDeclarations: tools.map(t => ({ name: t.name, description: t.description, parameters: geminiSchema(t.parameters) })) }];
     body.toolConfig = { functionCallingConfig: { mode: noTools ? 'NONE' : 'AUTO' } };
@@ -97,7 +108,7 @@ async function gemini({ system, items, tools, noTools, model, key, retried }) {
   if (r.status === 404 && !retried) {
     const names = await geminiModels(key).catch(() => []);
     const flash = names.filter(n => /^gemini-[\d.]+-flash$/.test(n)).sort((a, b) => parseFloat(b.split('-')[1]) - parseFloat(a.split('-')[1]));
-    if (flash[0] && flash[0] !== model) { log('model', model, 'not found; using', flash[0]); return gemini({ system, items, tools, noTools, model: flash[0], key, retried: true }); }
+    if (flash[0] && flash[0] !== model) { log('model', model, 'not found; using', flash[0]); return gemini({ system, items, tools, noTools, model: flash[0], key, retried: true, caps }); }
   }
   if (!r.ok) throw await failFrom(r, 'gemini');
   const j = await r.json().catch(() => ({}));
@@ -111,24 +122,28 @@ async function gemini({ system, items, tools, noTools, model, key, retried }) {
 }
 
 // OpenAI-compatible APIs take images as data URLs; audio and PDF are not portable, so they become a note.
-export function openaiUserContent(it) {
+export function openaiUserContent(it, caps = null) {
   if (!it.media || !it.media.length) return it.text;
-  const parts = []; const skipped = [];
+  const parts = []; const skipped = [], refused = [];
   for (const m of it.media) {
-    if (m.kind === 'image') parts.push({ type: 'image_url', image_url: { url: `data:${m.mime};base64,${m.data}` } });
-    else skipped.push(`"${m.name}" (${m.kind === 'audio' ? 'voice note' : m.kind})`);
+    const fmt = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3' }[String(m.mime).split(';')[0]];
+    if (caps && caps[CAP_OF[m.kind]] === false) refused.push(m);
+    else if (m.kind === 'image') parts.push({ type: 'image_url', image_url: { url: `data:${m.mime};base64,${m.data}` } });
+    // 2.3.2: a model whose Test showed it can hear gets wav/mp3 voice clips directly (other formats stay a note)
+    else if (m.kind === 'audio' && caps?.audio === true && fmt) parts.push({ type: 'input_audio', input_audio: { data: m.data, format: fmt } });
+    else skipped.push(mediaLabel(m));
   }
   const note = skipped.length ? `[The owner attached ${skipped.join(', ')}, but the current model cannot open it (no Gemini key was free). Tell him voice notes and PDFs need a working Gemini key (Settings → Brain → AI keys).]` : '';
-  parts.unshift({ type: 'text', text: [it.text, note].filter(Boolean).join('\n\n') || '(attachment)' });
+  parts.unshift({ type: 'text', text: [it.text, note, capsNote(refused)].filter(Boolean).join('\n\n') || '(attachment)' });
   return parts;
 }
 
-async function openaiCompat({ system, items, tools, noTools, base, model, key }) {
+async function openaiCompat({ system, items, tools, noTools, base, model, key, caps }) {
   base = String(base || '').replace(/\/+$/, '');
   if (!model) throw keyFail({ kind: 'model', reason: 'no model name — tap Test and pick one', until: 0, problem: 'model not found' });
   const msgs = [{ role: 'system', content: system }];
   for (const it of items) {
-    if (it.role === 'user') msgs.push({ role: 'user', content: openaiUserContent(it) });
+    if (it.role === 'user') msgs.push({ role: 'user', content: openaiUserContent(it, caps) });
     else if (it.role === 'assistant') msgs.push({ role: 'assistant', content: it.text || null, ...(it.calls?.length ? { tool_calls: it.calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })) } : {}) });
     else if (it.role === 'tool') msgs.push({ role: 'tool', tool_call_id: it.id, content: JSON.stringify(it.result) });
   }
@@ -145,6 +160,7 @@ async function openaiCompat({ system, items, tools, noTools, base, model, key })
 let mockFn = null;
 const heavyMedia = (items) => items.some(it => (it.media || []).some(m => m.kind !== 'image'));
 const anyMedia = (items) => items.some(it => (it.media || []).length);
+const mediaKindsOf = (items) => [...new Set(items.flatMap(it => (it.media || []).map(m => m.kind)).filter(k => ['image', 'audio', 'pdf'].includes(k)))];
 
 // ---------------- 2.3.1: which kind of job is this model call for ("Use for") ----------------
 export const CODING_TOOLS = new Set(['project_list', 'file_write', 'file_read', 'file_list', 'run_command', 'publish_site', 'unpublish_site', 'sites_list',
@@ -181,7 +197,7 @@ export async function callModel(args, opts = {}) {
   }
   const withMedia = heavyMedia(args.items || []);
   const use = opts.use && aikeys.USES.includes(opts.use) ? opts.use : null;
-  const keys = aikeys.usableKeys({ withMedia, use });
+  const keys = aikeys.usableKeys({ withMedia, use, mediaKinds: mediaKindsOf(args.items || []) });
   if (!keys.length) {
     const any = aikeys.listRows().length;
     throw userError(any ? 'All your AI keys are switched off (or have no key saved). Open Settings → Brain (AI model) → AI keys and switch one on.'
@@ -198,9 +214,10 @@ export async function callModel(args, opts = {}) {
       if (k.problem === 'model not found') { reasons.set(k.id, k.last_error || 'model not found — tap Test and pick one from the list'); continue; }
       try {
         const key = aikeys.keyValue(k.id);
+        const caps = aikeys.freshCaps(k);      // 2.3.2: null for a key that was never tested → exactly like 2.3.1
         const resp = k.kind === 'gemini'
-          ? await gemini({ ...args, key, model: k.model || setting('model') })
-          : await openaiCompat({ ...args, key, base: k.base_url, model: k.model });
+          ? await gemini({ ...args, key, model: k.model || setting('model'), caps })
+          : await openaiCompat({ ...args, key, base: k.base_url, model: k.model, caps });
         aikeys.markOk(k.id);
         if (String(k.id) !== prevInUse && reasons.size) {
           const [fid, why] = [...reasons.entries()][0];
@@ -229,7 +246,119 @@ export async function callModel(args, opts = {}) {
 }
 function userError(msg) { const e = new Error(msg); e.userMessage = msg; return e; }
 
+// ---------------- 2.3.2: what can this model do? (part of Test) ----------------
+// Tiny inputs, small answers, short timeouts, at most one call per capability, all at the same time.
+const PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFUlEQVR42mO8IyLCgA0wMeAAg1MCANDoARQXWCREAAAAAElFTkSuQmCC';  // 8×8 red square
+const PROBE_PDF = 'JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAyMDAgODBdIC9Db250ZW50cyA0IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA1IDAgUiA+PiA+PiA+PgplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDM1ID4+CnN0cmVhbQpCVCAvRjEgMjQgVGYgMjAgMzAgVGQgKEhFTExPKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyNDAgMDAwMDAgbiAKMDAwMDAwMDMyNSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM5NQolJUVPRgo=';  // one page that says HELLO
+let probeWav = null;
+function tinyWav() {     // 0.5 s, 8 kHz, 16-bit mono, a 440 Hz beep (~8 KB)
+  if (probeWav) return probeWav;
+  const n = 4000, b = Buffer.alloc(44 + n * 2);
+  b.write('RIFF', 0); b.writeUInt32LE(36 + n * 2, 4); b.write('WAVE', 8); b.write('fmt ', 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(8000, 24); b.writeUInt32LE(16000, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(Math.sin(2 * Math.PI * 440 * i / 8000) * 9000), 44 + i * 2);
+  return (probeWav = b.toString('base64'));
+}
+const PROBE_Q = {
+  images: 'What colour is the attached image? Answer with one word. If there is no image, answer NONE.',
+  audio: 'Is there an audio clip attached (a short beep)? Answer YES or NO.',
+  pdf: 'What word is written in the attached PDF? Answer with one word. If there is no PDF, answer NONE.',
+  tools: 'Call the ping tool now.',
+};
+// The model answered, but says it got nothing (some providers silently drop parts they can't take).
+const SAYS_NOTHING = /^\W*(none|no)\b|\bno (image|picture|photo|audio|clip|sound|pdf|file|attachment)\b|\b(can(?:no|')t|unable to|not able to|don'?t have the ability to) (see|view|hear|listen|open|read|process|access)\b|\bdon'?t see (an?|any)\b/i;
+function probeVerdict(cap, text) {
+  if (cap !== 'tools' && text && SAYS_NOTHING.test(text.slice(0, 300))) return { ok: false, why: 'the model said it got nothing' };
+  return { ok: true };
+}
+/** One probe call → { ok: true | false | null, why } (null = couldn't check: a limit, the provider having trouble, no answer). */
+async function probeCall(url, headers, body, provider) {
+  let r;
+  try { r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(cfg.testMode ? 5000 : 25000) }); }
+  catch (e) { return { ok: null, why: 'no answer (' + (e.name === 'TimeoutError' ? 'timed out' : e.cause?.code || e.message) + ')' }; }
+  const text = await r.text().catch(() => '');
+  if (r.ok) { let j = {}; try { j = JSON.parse(text); } catch {} return { ok: true, j }; }
+  const c = classify({ status: r.status, text, headers: r.headers, provider });
+  if (c.kind === 'quota') return { ok: null, why: 'limit', limit: true, reason: c.reason };
+  if (['server', 'network'].includes(c.kind) || r.status === 401 || r.status === 403) return { ok: null, why: c.reason };
+  return { ok: false, why: `refused (${r.status}${aikeys.providerMessage(text) ? ': ' + String(aikeys.providerMessage(text)).slice(0, 100) : ''})`, status: r.status, text };
+}
+export async function probeCaps(k, key, { model, allModels = null } = {}) {
+  const found = { text: true, why: {} };
+  const set = (cap, res) => { found[cap] = res.ok; if (res.ok !== true && res.why) found.why[cap] = res.why; };
+  if (k.kind === 'gemini') {
+    const base = cfg.geminiBase || 'https://generativelanguage.googleapis.com';
+    const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, hd = { 'x-goog-api-key': key };
+    const gc = { maxOutputTokens: 64 };
+    const one = async (cap, part) => {
+      const body = cap === 'tools'
+        ? { contents: [{ role: 'user', parts: [{ text: PROBE_Q.tools }] }], tools: [{ functionDeclarations: [{ name: 'ping', description: 'Health check. Call it when asked to ping.' }] }], generationConfig: gc }
+        : { contents: [{ role: 'user', parts: [{ inlineData: part }, { text: PROBE_Q[cap] }] }], generationConfig: gc };
+      const res = await probeCall(url, hd, body, 'gemini');
+      if (res.ok !== true) return res;
+      const cand = (res.j.candidates || [])[0];
+      if (!cand) return { ok: false, why: 'no answer' + (res.j.promptFeedback?.blockReason ? ' (blocked)' : '') };
+      return probeVerdict(cap, (cand.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('').trim());
+    };
+    const [im, au, pd, tl] = await Promise.all([
+      one('images', { mimeType: 'image/png', data: PROBE_PNG }), one('audio', { mimeType: 'audio/wav', data: tinyWav() }),
+      one('pdf', { mimeType: 'application/pdf', data: PROBE_PDF }), one('tools')]);
+    set('images', im); set('audio', au); set('pdf', pd); set('tools', tl);
+    found.files_text = true;
+    // Pictures: is an image model reachable with this key? Read from the model list, no picture is made.
+    if (Array.isArray(allModels)) {
+      const want = setting('image_model') || 'gemini-3.1-flash-image';
+      const imgs = allModels.filter(n => /image/.test(n) && !/imagen/.test(n));
+      set('pictures', imgs.includes(want) || imgs.length ? { ok: true } : { ok: false, why: 'no picture model on this key' });
+    } else set('pictures', { ok: null, why: 'model list not available' });
+    return found;
+  }
+  // OpenAI-compatible (Groq, OpenRouter, …)
+  const base = String(k.base_url || '').replace(/\/+$/, ''), url = base + '/chat/completions', hd = key ? { Authorization: 'Bearer ' + key } : {};
+  let tokField = 'max_tokens';
+  const one = async (cap, content, extra = {}) => {
+    const mk = (f) => ({ model, messages: [{ role: 'user', content }], [f]: 32, ...extra });
+    const f0 = tokField;
+    let res = await probeCall(url, hd, mk(f0), 'openai');
+    // some newer models only take max_completion_tokens: that is a wording fix, not a missing ability
+    if (res.ok === false && res.status === 400 && /max_tokens/.test(res.text || '') && f0 === 'max_tokens') { tokField = 'max_completion_tokens'; res = await probeCall(url, hd, mk(tokField), 'openai'); }
+    if (res.ok !== true) return res;
+    const m = res.j.choices?.[0]?.message;
+    if (!m) return { ok: false, why: 'no answer' };
+    return probeVerdict(cap, String(m.content || '').trim());
+  };
+  const [im, au, tl] = await Promise.all([
+    one('images', [{ type: 'text', text: PROBE_Q.images }, { type: 'image_url', image_url: { url: 'data:image/png;base64,' + PROBE_PNG } }]),
+    one('audio', [{ type: 'text', text: PROBE_Q.audio }, { type: 'input_audio', input_audio: { data: tinyWav(), format: 'wav' } }]),
+    one('tools', PROBE_Q.tools, { tools: [{ type: 'function', function: { name: 'ping', description: 'Health check. Call it when asked to ping.', parameters: { type: 'object', properties: {} } } }] })]);
+  set('images', im); set('audio', au); set('tools', tl);
+  set('pdf', { ok: false, why: 'PDFs need a Gemini key (Word, Excel, zip and text files are read as text)' });
+  found.files_text = true;                       // 2.3.1 already turns Word/Excel/PowerPoint/CSV/zip/code into text for any model
+  set('pictures', { ok: false, why: 'the picture maker needs a Gemini key' });
+  return found;
+}
+/** After a working Test: probe, store, auto-tick, write one Activity line. */
+async function testCaps(k, key, model, allModels) {
+  let found;
+  try { found = await probeCaps(k, key, { model, allModels }); }
+  catch (e) { log('caps probe failed:', e.message); return {}; }
+  const caps = aikeys.saveCaps(k.id, found);
+  const { added, removed } = aikeys.applyTestedUses(k.id);
+  const lim = Object.entries(caps.unchecked || {}).filter(([, w]) => w === 'limit').map(([c]) => aikeys.CAP_LABELS[c].toLowerCase());
+  const other = Object.keys(caps.unchecked || {}).filter(c => caps.unchecked[c] !== 'limit').map(c => aikeys.CAP_LABELS[c].toLowerCase());
+  const lbl = (u) => aikeys.USE_LABELS[u];
+  audit('owner', 'brain.key_tested', `Tested '${k.name}': ${aikeys.capsLine(caps)}${lim.length ? ` (couldn't check ${lim.join(', ')}: limit)` : ''}${other.length ? ` (couldn't check ${other.join(', ')})` : ''}`
+    + `${added.length ? ' · ticked ' + added.map(lbl).join(', ') : ''}${removed.length ? ' · unticked ' + removed.map(lbl).join(', ') : ''}`);
+  const sup = aikeys.useSupport(aikeys.keyRow(k.id));
+  const cant = aikeys.USES.filter(u => sup[u].ok === false);
+  let caps_note = [added.length ? 'Ticked ' + added.map(lbl).join(', ') + '.' : '', cant.length ? 'Greyed out: ' + cant.map(lbl).join(', ') + '.' : ''].filter(Boolean).join(' ');
+  if (lim.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${lim.join(', ')} (limit reached) — tap Test again later.`;
+  else if (other.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${other.join(', ')} — tap Test again later.`;
+  return { caps, caps_line: aikeys.capsLine(caps), caps_note, uses_added: added, uses_removed: removed };
+}
+
 /** Settings → Brain → AI keys → Test: lists the models the key can use and makes one tiny real request. */
+// 2.3.2: when the tiny request works, Test also checks what the model can do (photos, voice, PDF, pictures, tools).
 export async function testKey(id) {
   const k = aikeys.keyRow(id);
   if (!k) throw aikeys.httpErr(404, 'That key was removed');
@@ -255,7 +384,8 @@ export async function testKey(id) {
         body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Reply with the word OK.' }] }] }) });
       if (!r.ok) return fail(classify({ status: r.status, text: await r.text().catch(() => ''), headers: r.headers, provider }), models, model);
       aikeys.markTested(k.id);
-      return { ok: true, message: `✓ Works (${model})`, model, model_listed: all.includes(model), models };
+      const tc = await testCaps(k, key, model, all);
+      return { ok: true, message: `✓ Works (${model})`, model, model_listed: all.includes(model), models, ...tc };
     }
     const base = String(k.base_url || '').replace(/\/+$/, '');
     const auth = key ? { Authorization: 'Bearer ' + key } : {};
@@ -270,7 +400,8 @@ export async function testKey(id) {
     if (!r.ok) return fail(classify({ status: r.status, text: await r.text().catch(() => ''), headers: r.headers, provider }), models, k.model);
     aikeys.markTested(k.id);
     const listed = models.length ? models.includes(k.model) : undefined;
-    return { ok: true, message: `✓ Works (${k.model})${listed === false ? ' — but it is not in this key\'s model list' : ''}`, model: k.model, model_listed: listed, models };
+    const tc = await testCaps(k, key, k.model, models);
+    return { ok: true, message: `✓ Works (${k.model})${listed === false ? ' — but it is not in this key\'s model list' : ''}`, model: k.model, model_listed: listed, models, ...tc };
   } catch (e) {
     if (e.keyFail) return fail(e.keyFail);
     throw e;

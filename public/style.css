@@ -291,3 +291,24 @@ body.noscroll{overflow:hidden}
 
 .srcorder{margin:6px 0 0;padding-left:22px;overflow-wrap:anywhere}
 .srcorder li{margin:2px 0}
+
+/* 2.3.2: "This model can:" chips and greyed-out "Use for" reasons */
+.capsbox{margin:0 0 8px}
+.capwrap{border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:9px 10px}
+.capwrap.stale{border-style:dashed}
+.capwrap.stale .capchips{opacity:.6}
+.caphead{margin:0 0 6px;font-size:14px;font-weight:600;color:var(--text)}
+.caphead .fine{font-weight:400}
+.capchips{display:flex;flex-wrap:wrap;gap:6px}
+.capchip{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:12.5px;line-height:1.3;white-space:nowrap;background:var(--panel)}
+.capchip.yes{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.capchip.no{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,var(--line))}
+.capchip.unk{color:var(--warn);border-style:dashed}
+.capnote{margin:6px 0 0}
+.capnone{margin:0 0 6px}
+.usebox .usetext{min-width:0;overflow-wrap:anywhere}
+.usebox small.usewhy{color:var(--muted);margin-top:2px}
+.usebox small.usewhy.no{color:var(--warn)}
+.usebox:has(input:disabled){cursor:not-allowed;opacity:1}
+.usebox:has(input:disabled)>:not(.usetext),.usebox:has(input:disabled) .usetext>:not(.usewhy){opacity:.5}
+.sheet .msg{white-space:pre-line}

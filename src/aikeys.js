@@ -30,13 +30,87 @@ function cleanUses(v, kind) {
 function ensureTable() {
   db.exec(`CREATE TABLE IF NOT EXISTS ai_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind TEXT, base_url TEXT, model TEXT,
     active INTEGER DEFAULT 1, position INTEGER, created INTEGER, last_used INTEGER, last_ok INTEGER, last_error TEXT, last_error_at INTEGER,
-    cool_until INTEGER DEFAULT 0, problem TEXT, use_for TEXT)`);
+    cool_until INTEGER DEFAULT 0, problem TEXT, use_for TEXT, caps TEXT)`);
   // 2.3.0 → 2.3.1: add "Use for"; keys that had none get the defaults for their type.
   if (!all('PRAGMA table_info(ai_keys)').some(c => c.name === 'use_for')) {
     db.exec('ALTER TABLE ai_keys ADD COLUMN use_for TEXT');
     for (const r of all('SELECT id, kind FROM ai_keys')) run('UPDATE ai_keys SET use_for=? WHERE id=?', defaultUses(r.kind).join(','), r.id);
     if (all('SELECT id FROM ai_keys').length) audit('system', 'brain.keys', '2.3.1: gave each AI key its default "Use for" (Gemini: chat, voice/photos/files, pictures, background; OpenAI-compatible: chat, coding)');
   }
+  // 2.3.1 → 2.3.2: what each model can do (filled in by Test). Existing keys start untested and keep their ticks.
+  if (!all('PRAGMA table_info(ai_keys)').some(c => c.name === 'caps')) db.exec('ALTER TABLE ai_keys ADD COLUMN caps TEXT');
+}
+
+// ---------------- 2.3.2: what the model can do ("caps"), found by Test ----------------
+// caps = { v, kind, model, base_url, text, images, audio, pdf, files_text, pictures, tools, checked_at, unchecked: {cap: why}, stale }
+// Each capability is true (works), false (refused) or null (could not be checked, e.g. a limit). No secrets in here.
+export const CAPS = ['text', 'images', 'audio', 'pdf', 'pictures', 'tools'];
+export const CAP_LABELS = { text: 'Chat', images: 'Photos', audio: 'Voice', pdf: 'PDF', pictures: 'Pictures', tools: 'Tools' };
+const MEDIA_CAP = { image: 'images', audio: 'audio', pdf: 'pdf' };
+export function capsOf(r) { if (!r || !r.caps) return null; try { const c = JSON.parse(r.caps); return c && typeof c === 'object' ? c : null; } catch { return null; } }
+function effModel(r) { return r.model || (r.kind === 'gemini' ? setting('model') || DEFAULTS.model : ''); }
+/** The caps only count while they were found for this key's current type, address and model, and the key was not replaced since. */
+export function freshCaps(r) {
+  const c = capsOf(r);
+  if (!c || c.stale || c.kind !== r.kind || c.model !== effModel(r) || (r.kind === 'openai' && (c.base_url || '') !== (r.base_url || ''))) return null;
+  return c;
+}
+const and = (...v) => v.includes(false) ? false : v.includes(null) || v.includes(undefined) ? null : true;
+/** For each "Use for": ok true/false/null (null = not known yet → behave like 2.3.1) and a one-line reason. */
+export function useSupport(r) {
+  const c = freshCaps(r);
+  const out = {};
+  if (!c) {
+    for (const u of USES) out[u] = { ok: null, why: '' };
+    if (r.kind !== 'gemini') out.pictures = { ok: false, why: 'Pictures need a Gemini key' };
+    return out;
+  }
+  const v = (k) => c[k] === true ? true : c[k] === false ? false : null;
+  const ok = (x) => x === true ? '✓' : x === false ? '✗' : '?';
+  out.chat = { ok: v('text'), why: v('text') === false ? 'This model did not answer a simple chat message' : '' };
+  const tw = v('tools') === false ? 'This model can\'t use tools, so it can\'t do this' : '';
+  out.coding = { ok: and(v('text'), v('tools')), why: tw };
+  out.background = { ok: and(v('text'), v('tools')), why: tw };
+  out.pictures = { ok: r.kind !== 'gemini' ? false : v('pictures'),
+    why: r.kind !== 'gemini' ? 'Pictures need a Gemini key' : v('pictures') === false ? 'This key can\'t reach the picture model' : '' };
+  const m = [v('images'), v('audio'), v('pdf')];
+  const mOk = m.includes(true) ? true : m.every(x => x === false) ? false : null;
+  const detail = `photos ${ok(m[0])} voice ${ok(m[1])} PDF ${ok(m[2])}${c.files_text ? ' · Word/Excel/zip as text ✓' : ''}`;
+  out.media = { ok: mOk, why: mOk === false ? 'This model can\'t see photos, hear voice notes or read PDFs' : m.every(x => x === true) ? '' : detail };
+  return out;
+}
+/** Short text for the Activity log: "chat ✓ tools ✓ photos ✗ voice ✗ PDF ✗ pictures ✗". */
+export function capsLine(c) {
+  const ok = (x) => x === true ? '✓' : x === false ? '✗' : '?';
+  return [['chat', 'text'], ['tools', 'tools'], ['photos', 'images'], ['voice', 'audio'], ['PDF', 'pdf'], ['pictures', 'pictures']].map(([l, k]) => `${l} ${ok(c[k])}`).join(' ');
+}
+/** Test found new caps: store them (keeping an older answer for anything that could not be checked this time). */
+export function saveCaps(id, found) {
+  const r = keyRow(id); if (!r) return null;
+  const old = freshCaps(r);
+  const c = { v: 1, kind: r.kind, model: effModel(r), base_url: r.kind === 'openai' ? (r.base_url || '') : '', checked_at: now(), unchecked: {} };
+  for (const k of [...CAPS, 'files_text']) {
+    const val = found[k];
+    if (val === true || val === false) c[k] = val;
+    else { c[k] = old && (old[k] === true || old[k] === false) ? old[k] : null; if (k !== 'files_text') c.unchecked[k] = found.why?.[k] || 'not checked'; }
+  }
+  if (found.why) c.why = Object.fromEntries(Object.entries(found.why).map(([k, w]) => [k, redact(String(w)).slice(0, 160)]));
+  run('UPDATE ai_keys SET caps=? WHERE id=?', JSON.stringify(c), id);
+  return c;
+}
+/** After a Test: tick every "Use for" the model can do, untick the ones it can't; leave the unknown ones as they were. */
+export function applyTestedUses(id) {
+  const r = keyRow(id); if (!r) return { added: [], removed: [] };
+  const sup = useSupport(r), cur = usesOf(r);
+  const next = USES.filter(u => sup[u].ok === true || (sup[u].ok === null && cur.includes(u)));
+  const added = next.filter(u => !cur.includes(u)), removed = cur.filter(u => !next.includes(u));
+  if (added.length || removed.length) run('UPDATE ai_keys SET use_for=? WHERE id=?', next.join(','), id);
+  return { added, removed };
+}
+/** Can this key take every kind of media in the request? false only when its (current) caps say no. */
+export function cannotTake(r, mediaKinds = []) {
+  const c = freshCaps(r); if (!c) return [];
+  return [...new Set(mediaKinds)].filter(k => MEDIA_CAP[k] && c[MEDIA_CAP[k]] === false);
 }
 
 /** Carry the 2.2 settings over (runs on start and before every use; each part runs once). */
@@ -101,7 +175,7 @@ export function publicKey(r) {
     last_error: r.last_error || null, last_error_at: r.last_error_at || null, problem: r.problem || null,
     resting_until: r.cool_until > t ? r.cool_until : null, resting_until_text: r.cool_until > t ? clock(r.cool_until) : null,
     effective_model: r.model || (r.kind === 'gemini' ? setting('model') || DEFAULTS.model : ''),
-    use_for: usesOf(r),
+    use_for: usesOf(r), caps: capsOf(r), caps_fresh: !!freshCaps(r), use_support: useSupport(r),
     in_use: String(r.id) === setting('ai_key_in_use') };
 }
 export function listKeys() { return listRows().map(publicKey); }
@@ -123,12 +197,16 @@ export function updateKey(id, b) {
   const base = kind === 'openai' ? (b.base_url !== undefined ? cleanBase(b.base_url) : (r.base_url || cleanBase(b.base_url))) : '';
   const model = b.model !== undefined ? cleanModel(b.model, kind) : r.model;
   const active = b.active !== undefined ? (b.active ? 1 : 0) : r.active;
-  const uses = b.use_for !== undefined ? cleanUses(b.use_for, kind) : usesOf(r);
+  let uses = b.use_for !== undefined ? cleanUses(b.use_for, kind) : usesOf(r);
+  const keyReplaced = b.key !== undefined && !!String(b.key).trim();
+  // 2.3.2: a job the last Test showed this model can't do is not kept (the screen greys it out too).
+  if (b.use_for !== undefined && !keyReplaced) { const sup = useSupport({ ...r, kind, base_url: base, model }); uses = uses.filter(u => sup[u].ok !== false); }
   const usesChanged = uses.join(',') !== usesOf(r).join(',');
   const changedSetup = kind !== r.kind || base !== (r.base_url || '') || model !== r.model || (b.key !== undefined && String(b.key).trim());
   run('UPDATE ai_keys SET name=?, kind=?, base_url=?, model=?, active=?, use_for=? WHERE id=?', name, kind, base, model, active, uses.join(','), r.id);
   if (b.key !== undefined && String(b.key).trim()) setSecret(SEC(r.id), String(b.key).trim());
-  if (changedSetup) run('UPDATE ai_keys SET problem=NULL, cool_until=0 WHERE id=?', r.id);    // fixed it? try again right away
+  if (changedSetup) run('UPDATE ai_keys SET problem=NULL, cool_until=0 WHERE id=?', r.id);
+  if (keyReplaced) { const c = capsOf(r); if (c) run('UPDATE ai_keys SET caps=? WHERE id=?', JSON.stringify({ ...c, stale: true }), r.id); }   // new key → Test again    // fixed it? try again right away
   const what = [b.name !== undefined && name !== r.name ? 'renamed' : '', active !== r.active ? (active ? 'switched on' : 'switched off') : '',
     b.key !== undefined && String(b.key).trim() ? 'key replaced' : '', model !== r.model ? 'model ' + model : '',
     usesChanged ? 'use for ' + (uses.map(u => USE_LABELS[u]).join(', ') || 'nothing') : ''].filter(Boolean).join(', ');
@@ -198,7 +276,7 @@ function secondsFrom(text) {
   if (g && (g[1] || g[2] || g[3])) return (parseInt(g[1] || 0, 10) * 3600) + (parseInt(g[2] || 0, 10) * 60) + parseFloat(g[3] || 0);
   return 0;
 }
-function providerMessage(text) {
+export function providerMessage(text) {
   try { const j = JSON.parse(text); const e = Array.isArray(j) ? j[0]?.error : j.error; return String((e && (e.message || e.status)) || j.message || '').trim(); } catch { return String(text || '').trim(); }
 }
 const short = (s, n = 140) => { s = redact(String(s || '')).replace(/\s+/g, ' ').replace(/https?:\/\/\S+/g, '').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -252,20 +330,24 @@ export function markFail(id, c, { fromTest = false } = {}) {
  * for it come first (in his order), then every other active key as a fallback. withMedia = the request
  * carries a voice note, photo or PDF: Gemini keys first in both groups (they can hear and see).
  */
-export function usableKeys({ withMedia = false, use = null } = {}) {
+export function usableKeys({ withMedia = false, use = null, mediaKinds = [] } = {}) {
   const rows = listRows().filter(r => r.active && (r.kind === 'openai' || hasSecret(SEC(r.id))));
   const groups = use ? [rows.filter(r => usesOf(r).includes(use)), rows.filter(r => !usesOf(r).includes(use))] : [rows];
-  const out = [];
+  let out = [];
   if (withMedia) { for (const g of groups) out.push(...g.filter(r => r.kind === 'gemini')); for (const g of groups) out.push(...g.filter(r => r.kind !== 'gemini')); }
   else for (const g of groups) out.push(...g);
-  return out.map(r => ({ ...r, tagged: !use || usesOf(r).includes(use) }));
+  // 2.3.2: a key whose Test showed it can't take this request's media (voice / photo / PDF) goes to the very end:
+  // it is only used when nothing else answers, and then the media reaches it as a short note instead.
+  if (mediaKinds.length) { const ok = out.filter(r => !cannotTake(r, mediaKinds).length); out = [...ok, ...out.filter(r => !ok.includes(r))]; }
+  return out.map(r => ({ ...r, tagged: !use || usesOf(r).includes(use), cannot: mediaKinds.length ? cannotTake(r, mediaKinds) : [] }));
 }
 /** Gemini keys for picture creation: tagged "Pictures" first, then the other Gemini keys; free ones before resting ones. */
 export function geminiKeys() {
   const t = now();
   const rows = usableKeys({ use: 'pictures' }).filter(r => r.kind === 'gemini');
   const free = (r) => !(r.cool_until > t) && !r.problem;
-  return [...rows.filter(r => free(r)), ...rows.filter(r => !free(r))].map(r => ({ id: r.id, name: r.name, key: keyValue(r.id), tagged: r.tagged }));
+  const noPic = (r) => freshCaps(r)?.pictures === false;          // 2.3.2: Test showed this key can't reach the picture model
+  return [...rows.filter(r => free(r) && !noPic(r)), ...rows.filter(r => !free(r) && !noPic(r)), ...rows.filter(r => noPic(r))].map(r => ({ id: r.id, name: r.name, key: keyValue(r.id), tagged: r.tagged }));
 }
 export function inUse() {
   const r = setting('ai_key_in_use') && get('SELECT * FROM ai_keys WHERE id=?', Number(setting('ai_key_in_use')));
@@ -274,6 +356,7 @@ export function inUse() {
 export function statusSummary() {
   return listKeys().map(k => ({ name: k.name, type: k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible', model: k.effective_model, active: k.active, in_use: k.in_use,
     use_for: k.use_for.map(u => USE_LABELS[u]),
+    can_do: k.caps_fresh ? capsLine(k.caps) : 'not tested yet (tap Test)',
     status: !k.active ? 'inactive' : k.resting_until ? 'resting until ' + k.resting_until_text : k.problem ? k.problem : k.last_ok ? 'working' : 'not used yet',
     last_error: k.last_error || undefined }));
 }

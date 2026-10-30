@@ -20,6 +20,15 @@ NEW IN 2.1
 - Before the database changes for 2.1, a full copy is saved in
   /var/lib/myassistant/backups/pre-2.1.0-<time>.db (kept, never auto-deleted).
 
+2.3.2
+- Test checks what each model can do: Settings → Brain → tap a key → Test.
+  It sends the model a tiny photo, a half-second sound, a one-word PDF and a
+  tiny tool call, then shows "This model can:" ✓/✗ (Chat, Photos, Voice, PDF,
+  Pictures, Tools). It ticks every "Use for" the model can do and greys out the
+  rest with the reason. Keys you have not tested keep their ticks as before.
+- Voice notes only go to keys that can hear, photos only to keys that can see
+  (from the last Test). A limit during Test shows "couldn't check", not ✗.
+
 2.3.1
 - Each AI key has "Use for" (Chat, Coding, Pictures, Voice & files, Background):
   Settings → Brain (AI keys) → tap a key. Busy or missing → the next active key.

@@ -1,6 +1,6 @@
 {
   "name": "myassistant",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "private": true,
   "description": "Self-hosted personal AI assistant (owner-only). No npm dependencies: Node 22 built-ins only (http, crypto, node:sqlite, child_process).",
   "type": "module",

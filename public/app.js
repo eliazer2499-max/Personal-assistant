@@ -617,9 +617,30 @@ async function generalView(body) {
 }
 
 const USE_ORDER = ['chat', 'coding', 'pictures', 'media', 'background'];
-const USE_INFO = { chat: ['💬', 'Chat', 'everyday questions and tasks'], coding: ['💻', 'Coding', 'apps, sites, scripts, servers'], pictures: ['🎨', 'Pictures', 'making pictures (Gemini only)'],
+const USE_INFO = { chat: ['💬', 'Chat', 'everyday questions and tasks'], coding: ['💻', 'Coding', 'apps, sites, scripts, servers'], pictures: ['🎨', 'Pictures', 'making pictures'],
   media: ['🎤', 'Voice, photos & files', 'voice notes, photos, PDFs'], background: ['⏰', 'Background jobs', 'reminders, summaries, helpers'] };
 const USE_SHORT = { chat: '💬 Chat', coding: '💻 Coding', pictures: '🎨 Pictures', media: '🎤 Voice & files', background: '⏰ Background' };
+// 2.3.2: what the model can do, found by Test
+const CAP_ORDER = ['text', 'images', 'audio', 'pdf', 'pictures', 'tools'];
+const CAP_NAME = { text: 'Chat', images: 'Photos', audio: 'Voice', pdf: 'PDF', pictures: 'Pictures', tools: 'Tools' };
+const testMsg = (x) => x.message + (x.caps_note ? '\n' + x.caps_note : '');
+function capsView(k) {
+  const c = k && k.caps;
+  if (!c) return h('p', { class: 'fine capnone', 'data-caps': 'none' }, 'Tap Test to check what this model can do (photos, voice, PDF, pictures, tools).');
+  const chips = h('div', { class: 'capchips' }, CAP_ORDER.map(x => {
+    const v = c[x], why = (c.unchecked && c.unchecked[x]) || (c.why && c.why[x]) || '';
+    const cls = v === true ? 'yes' : v === false ? 'no' : 'unk';
+    return h('span', { class: 'capchip ' + cls, 'data-cap': x, 'data-ok': String(v), title: why }, (v === true ? '✓ ' : v === false ? '✗ ' : '? ') + CAP_NAME[x]);
+  }));
+  const lim = Object.entries(c.unchecked || {}).filter(([x]) => c[x] !== true && c[x] !== false).map(([x, w]) => CAP_NAME[x] + (w === 'limit' ? ' (limit)' : ''));
+  const notes = [];
+  if (!k.caps_fresh) notes.push(c.model && c.model !== k.effective_model ? `This was for ${c.model}. Tap Test to check ${k.effective_model || 'the new model'}.` : 'The key or address changed since. Tap Test to check again.');
+  else if (lim.length) notes.push("Couldn't check: " + lim.join(', ') + '. Tap Test again later.');
+  if (c.files_text && c.pdf === false && k.kind !== 'gemini') notes.push('Word, Excel, PowerPoint, CSV, zip and code files are read as text.');
+  return h('div', { class: 'capwrap' + (k.caps_fresh ? '' : ' stale'), 'data-caps': k.caps_fresh ? 'fresh' : 'stale' },
+    h('p', { class: 'caphead' }, 'This model can:', c.checked_at ? h('span', { class: 'fine' }, ' · checked ' + ago(c.checked_at)) : null), chips,
+    ...notes.map(n => h('p', { class: 'fine capnote' }, n)));
+}
 function keyStatus(k) {
   if (!k.active) return ['Off', ''];
   if (k.resting_until) return ['Resting till ' + String(k.resting_until_text).replace(/\s+[A-Z]{2,5}$/, ''), 'warn'];
@@ -632,9 +653,11 @@ function keyStatus(k) {
 function whoDoesWhat(keys) {
   const free = (k) => k.active && !k.resting_until && !k.problem && (k.has_key || k.kind === 'openai');
   return USE_ORDER.map(u => {
-    const pool = u === 'pictures' ? keys.filter(k => k.kind === 'gemini') : keys;
-    const tagged = (u === 'media' ? pool.find(k => free(k) && k.use_for.includes(u) && k.kind === 'gemini') : null) || pool.find(k => free(k) && k.use_for.includes(u));
-    const any = tagged || (u === 'media' ? pool.find(k => free(k) && k.kind === 'gemini') : null) || pool.find(k => free(k));
+    const can = (k) => (k.use_support?.[u]?.ok ?? null) !== false;          // 2.3.2: Test showed it can't → not picked
+    const hears = (k) => k.use_support?.media?.ok === true || (k.kind === 'gemini' && can(k));
+    const pool = (u === 'pictures' ? keys.filter(k => k.kind === 'gemini') : keys).filter(can);
+    const tagged = (u === 'media' ? pool.find(k => free(k) && k.use_for.includes(u) && hears(k)) : null) || pool.find(k => free(k) && k.use_for.includes(u));
+    const any = tagged || (u === 'media' ? pool.find(k => free(k) && hears(k)) : null) || pool.find(k => free(k));
     return [u, any, !!tagged];
   });
 }
@@ -711,11 +734,27 @@ async function brainView(body) {
     if (k) act1.onchange = async () => { try { const x = await api(`/api/brain/keys/${k.id}`, { active: act1.checked }); k = x.key; paintKeys({ ...K, keys: x.keys }); say(o, act1.checked ? 'Switched on.' : 'Switched off.', true); } catch (e) { say(o, e.message); act1.checked = !act1.checked; } };
     const baseWrap = h('div', {}, h('label', {}, 'API base URL'), base);
     const help = h('p', { class: 'fine' });
-    const useBoxes = {};
+    const useBoxes = {}, useWhy = {};
     const usesWrap = h('div', { class: 'uses' }, USE_ORDER.map(u => {
       const cb = h('input', { type: 'checkbox', 'data-use': u, id: 'use-' + u }); useBoxes[u] = cb;
-      return h('label', { class: 'usebox', for: 'use-' + u }, cb, h('span', { class: 'useic', 'aria-hidden': 'true' }, USE_INFO[u][0]), h('span', {}, h('b', {}, USE_INFO[u][1]), h('small', {}, USE_INFO[u][2])));
+      useWhy[u] = h('small', { class: 'usewhy', 'data-why': u, hidden: true });
+      return h('label', { class: 'usebox', for: 'use-' + u }, cb, h('span', { class: 'useic', 'aria-hidden': 'true' }, USE_INFO[u][0]), h('span', { class: 'usetext' }, h('b', {}, USE_INFO[u][1]), h('small', {}, USE_INFO[u][2]), useWhy[u]));
     }));
+    const capsWrap = h('div', { class: 'capsbox' });
+    // 2.3.2: grey out what the model can't do (from the last Test), with a one-line reason. Untested = like 2.3.1.
+    const applySupport = () => {
+      const v = kind.value, kindNow = v === 'gemini' ? 'gemini' : 'openai';
+      const sameSetup = k && k.kind === kindNow;
+      const sup = sameSetup && k.use_support ? k.use_support : Object.fromEntries(USE_ORDER.map(u => [u, { ok: null, why: '' }]));
+      if (kindNow !== 'gemini') sup.pictures = { ok: false, why: 'Pictures need a Gemini key' };
+      for (const u of USE_ORDER) {
+        const s = sup[u] || { ok: null, why: '' };
+        useBoxes[u].disabled = s.ok === false; if (s.ok === false) useBoxes[u].checked = false;
+        useWhy[u].textContent = s.why || ''; useWhy[u].hidden = !s.why;
+        useWhy[u].className = 'usewhy' + (s.ok === false ? ' no' : '');
+      }
+      capsWrap.replaceChildren(sameSetup || !k ? capsView(k) : h('p', { class: 'fine capnone', 'data-caps': 'none' }, 'Save, then tap Test to check what this model can do.'));
+    };
     const defaultsFor = (v) => v === 'gemini' ? ['chat', 'pictures', 'media', 'background'] : ['chat', 'coding'];
     const setUses = (list) => USE_ORDER.forEach(u => { useBoxes[u].checked = list.includes(u); });
     setUses(k ? k.use_for : defaultsFor('gemini'));
@@ -724,19 +763,19 @@ async function brainView(body) {
       if (v === 'groq' && fromUser) { base.value = K.groq.base_url; if (!kmodel.value || isNew) kmodel.value = K.groq.model; }
       if (v === 'openai' && fromUser && base.value === K.groq.base_url) base.value = '';
       if (fromUser && isNew) setUses(defaultsFor(v));
-      useBoxes.pictures.disabled = v !== 'gemini'; if (v !== 'gemini') useBoxes.pictures.checked = false;
+      applySupport();
       kmodel.placeholder = v === 'gemini' ? 'empty = default (' + (K.default_model || 'gemini-3.6-flash') + ')' : v === 'groq' ? K.groq.model : 'model name (tap Test to see the list)';
       help.replaceChildren(...(v === 'gemini' ? ['Get a free key: ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener' }, 'aistudio.google.com/apikey'), ' → Create API key. A key from another Google project has its own free limit.']
-        : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. Groq cannot hear voice notes, see photos or read PDFs.']
-          : ['Any OpenAI-compatible API (OpenRouter, OpenAI, a local server…). Voice notes and PDFs need a Gemini key.']));
+        : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. After saving, tap Test: it checks what the model can do (most Groq models can\'t hear voice notes or see photos).']
+          : ['Any OpenAI-compatible API (OpenRouter, OpenAI, a local server…). After saving, tap Test: it checks what the model can do.']));
     };
     kind.onchange = () => sync(true); sync(isNew);
     const models = h('div', { class: 'kmodelswrap' });
     const showModels = (list) => {
       models.replaceChildren(...(list && list.length ? [h('p', { class: 'fine' }, 'Models this key can use — tap one to choose it:'), h('div', { class: 'kmodels' }, list.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === (kmodel.value || k?.effective_model) ? ' on' : ''), 'data-model': m,
-        onclick: async () => { kmodel.value = m; if (!isNew) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); say(to, `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } } showModels(list); } }, m)))] : []));
+        onclick: async () => { kmodel.value = m; if (!isNew) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); say(to, `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } } showModels(list); } }, m)))] : []));
     };
-    if (k && testOut[k.id]) { say(to, testOut[k.id].message, testOut[k.id].ok); showModels(testOut[k.id].models); }
+    if (k && testOut[k.id]) { say(to, testMsg(testOut[k.id]), testOut[k.id].ok); showModels(testOut[k.id].models); }
     const body = () => {
       const b = { name: kname.value, kind: kind.value === 'gemini' ? 'gemini' : 'openai', model: kmodel.value, active: act1.checked, use_for: USE_ORDER.filter(u => useBoxes[u].checked) };
       if (kind.value !== 'gemini') b.base_url = kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value;
@@ -749,8 +788,12 @@ async function brainView(body) {
     };
     const test = async (e) => {
       if (isNew) return say(to, 'Save the key first, then tap Test.');
-      const x = await act(e.target, to, () => api(`/api/brain/keys/${k.id}/test`, {}), x => x.message);
-      if (x) { testOut[k.id] = x; showModels(x.models); if (x.key) { k = x.key; } paintKeys(); }
+      const x = await act(e.target, to, () => api(`/api/brain/keys/${k.id}/test`, {}), testMsg);
+      if (x) {
+        testOut[k.id] = x; showModels(x.models);
+        if (x.key) { k = x.key; if (x.caps) setUses(k.use_for); applySupport(); }     // ticks what it can do, greys out the rest
+        paintKeys();
+      }
     };
     const idx = k ? K.keys.findIndex(x => x.id === k.id) : -1;
     const move = (dir) => async () => { const x = await api(`/api/brain/keys/${k.id}/move`, { dir }); await paintKeys({ ...K, keys: x.keys }); openSheet(x.keys.find(y => y.id === k.id)); };
@@ -764,7 +807,7 @@ async function brainView(body) {
         h('label', {}, 'Type'), kind, help, baseWrap,
         h('label', {}, 'Model'), kmodel, models,
         h('label', {}, 'Key'), kkey,
-        h('label', {}, 'Use for'), usesWrap,
+        h('label', {}, 'Use for'), capsWrap, usesWrap,
         h('p', { class: 'fine' }, 'The assistant picks this key for the jobs ticked here. If it is busy or out of limit, another key takes over.'),
         h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', 'data-save': '1', onclick: save }, isNew ? 'Add key' : 'Save'),
           k ? h('button', { 'data-test': k.id, onclick: test }, 'Test') : null), o, to,

@@ -246,7 +246,8 @@ test('Test button: Gemini lists models and makes a tiny request; errors are read
   assert.equal(r.j.ok, true); assert.equal(r.j.message, '✓ Works (gemini-3.6-flash)');
   assert.ok(r.j.models.includes('gemini-3.6-flash-lite') && !r.j.models.includes('gemini-3.1-flash-image') && !r.j.models.includes('text-embedding-005'));
   assert.equal(r.j.models[0], 'gemini-3.6-flash-lite', 'lite models first');
-  assert.equal(CALLS.length, 1); assert.equal(CALLS[0].key, K.MAIN);
+  // 2.3.2: after the one tiny request, Test also checks photos, voice, PDF and tools (one small call each)
+  assert.ok(CALLS.length >= 1 && CALLS.length <= 5, 'one test call + at most 4 capability checks'); assert.equal(CALLS[0].key, K.MAIN);
   MODE[K.MAIN] = '429day';
   r = await call(`/api/brain/keys/${main.id}/test`, {});
   assert.equal(r.j.ok, false); assert.match(r.j.message, /^✗ Google free daily limit reached \(429\) — resets ~/);
