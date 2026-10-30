@@ -31,6 +31,7 @@ import { ownerSaid } from './inbound.js';
 import { addMessage } from '../notify.js';
 import { mainChatId } from '../chats.js';
 import * as files from '../files.js';
+import { splitStatusEmoji } from '../emoji.js';
 
 export const CHANNEL = 'whatsapp_agent';
 export const VAULT_NAME = 'whatsapp-agent';
@@ -285,6 +286,46 @@ export async function toolReact(wamid, emoji) {
   markReacted(id, !!sent);
   return { skipped: false, emoji: sent };
 }
+/**
+ * 2.3.5 safety net for the outbound text. The AI sometimes types its reaction ("✅", blank line, then the words)
+ * instead of calling the react tool. A first or last line holding only 1–2 status emoji (✅ ☑️ ✔️ 👍 👌 ❤️ 🙏 😂 👀
+ * 🎉 🔥) is taken out of the text and, when Reactions is Natural or Every message and the Natural cap allows, put on
+ * the message being answered as a real reaction through reactTo (via toolReact, so the cap and Off are obeyed).
+ * Off → the line is just dropped. A reply that is ONLY the emoji is never stripped to nothing: it goes as a reaction
+ * instead of a bubble, or as text when Reactions is Off, there is no message to react to, the cap says no or the
+ * reaction fails. Emoji inside a sentence are never touched. Activity gets one line; the chat never does.
+ * Returns { text: string to send | null when nothing is left to send, reacted: emoji | '' }.
+ */
+export async function moveStatusEmoji(text, wamid) {
+  const s = splitStatusEmoji(text);
+  if (!s.where) return { text, reacted: '' };
+  const e = s.emoji, id = String(wamid || '').trim();
+  const mode = reactMode();
+  const can = mode !== 'off' && WAMID_RE.test(id);
+  let reacted = '', why = '';
+  if (can) {
+    const tryIt = async () => {
+      const r = await toolReact(id, e);
+      if (r.skipped) { why = 'already reacted to his last 2 messages'; return ''; }
+      return r.emoji || e;
+    };
+    if (s.where === 'only') {
+      try { reacted = await tryIt(); } catch (err) { why = err.message; }
+    } else {
+      // never hold up the words: the reaction goes out beside them
+      tryIt().then((x) => { if (x) audit('assistant', 'wa_agent.react_moved', `moved ${e} from text to reaction`); else audit('system', 'wa_agent.react_moved', `removed ${e} from the text; no reaction (${why})`); })
+        .catch((err) => { log('wa agent react', err.message); audit('system', 'wa_agent.react_failed', `moved ${e} out of the text, reaction not sent: ${err.message}`); });
+      return { text: s.text, reacted: e };
+    }
+  } else why = mode === 'off' ? 'Reactions are Off' : 'no message of his to react to';
+  if (s.where === 'only') {
+    if (reacted) { audit('assistant', 'wa_agent.react_moved', `moved ${e} from text to reaction (the reply was only ${e})`); return { text: null, reacted }; }
+    audit('system', 'wa_agent.react_moved', `the reply was only ${e}; sent it as text (${why})`);
+    return { text, reacted: '' };
+  }
+  audit('system', 'wa_agent.react_moved', `removed ${e} from the text; no reaction (${why})`);
+  return { text: s.text, reacted: '' };
+}
 export async function markRead(wamid, typing = true) {
   if (!limits.statuses.tryAcquire()) throw new WaErr('rate', 'statuses: local budget used up');
   const body = { messaging_product: 'whatsapp', status: 'read', message_id: wamid };
@@ -447,6 +488,10 @@ export async function sendOwner(text, opts = {}) {
   if (!hasKey()) throw new Error('No WhatsApp Agent key saved');
   const to = setting('wa_agent_creator');
   if (!to) throw new Error('Send your WhatsApp agent one message first, so I know your chat');
+  // 2.3.5: a lone "✅" line typed into the reply becomes a real reaction on his message (or is just dropped).
+  const net = await moveStatusEmoji(text, opts.meta?.waa_wamid);
+  if (net.reacted && net.text === null) return true;           // the whole reply was an emoji: it went as a reaction
+  text = net.text ?? text;
   const jobs = splitText(toWhatsApp(text)).map(c => enqueue({ type: 'text', to, text: c }));
   for (const f of opts.files || []) {
     try { jobs.push(enqueue({ type: 'file', to, buf: fs.readFileSync(files.filePath(f)), mime: f.mime, name: f.name })); } catch (e) { log('wa agent: file not sent', e.message); }

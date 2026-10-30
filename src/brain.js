@@ -8,6 +8,7 @@ import { addMessage, deliver } from './notify.js';
 import { chatById, mainChatId, autoTitle } from './chats.js';
 import { validateUnsent, claimFiles, filesOfMessage, modelInput, MAX_INLINE } from './files.js';
 import * as aikeys from './aikeys.js';
+import { withoutStatusEmoji } from './emoji.js';
 import { classify } from './aikeys.js';
 export { aikeys };
 
@@ -410,8 +411,10 @@ export async function testKey(id) {
 
 // ---------------- system prompt ----------------
 // 2.3.4: reaction guidance follows Settings → Channels → WhatsApp Agent → Reactions.
-export const REACT_GUIDE_NATURAL = 'On WhatsApp you can put an emoji reaction on his message with the react tool. React the way a friend texting does: most messages get no reaction at all. Good fits: 👍 when he gives you a task that will take a while (so he knows you picked it up), ❤️ for thanks or good news, 😂 for something funny, ✅ when a task he asked for is done, 🙏 for an apology or a favour. Never react to every message, don\'t react twice in a row unless it really fits, and never react instead of answering a question. As a rough guide, react to at most about 1 in 3 of his messages.';
-export const REACT_GUIDE_EVERY = 'On WhatsApp his messages already get an automatic reaction. You can change it with the react tool (❤️ thanks/good news, 😂 a joke, ✅ a job he asked for is done). Use it sparingly, and a reaction never replaces an answer he needs.';
+// 2.3.5: both modes also say: no lone ✅ line in the text — the react tool is how a reaction is made.
+export const NO_LONE_EMOJI = 'Never start or end a reply with a lone status emoji such as ✅ 👍 ❤️. To react, call the react tool; it puts the emoji on his message. Emoji inside normal sentences are fine.';
+export const REACT_GUIDE_NATURAL = 'On WhatsApp you can put an emoji reaction on his message with the react tool. React the way a friend texting does: most messages get no reaction at all. Good fits: 👍 when he gives you a task that will take a while (so he knows you picked it up), ❤️ for thanks or good news, 😂 for something funny, ✅ when a task he asked for is done, 🙏 for an apology or a favour. Never react to every message, don\'t react twice in a row unless it really fits, and never react instead of answering a question. As a rough guide, react to at most about 1 in 3 of his messages. ' + NO_LONE_EMOJI;
+export const REACT_GUIDE_EVERY = 'On WhatsApp his messages already get an automatic reaction. You can change it with the react tool (❤️ thanks/good news, 😂 a joke, ✅ a job he asked for is done). Use it sparingly, and a reaction never replaces an answer he needs. ' + NO_LONE_EMOJI;
 function reactGuidance() {
   const m = setting('wa_agent_react_mode');
   if (m === 'off') return [];
@@ -499,7 +502,7 @@ function history(limit, beforeId, chatId, budget = MAX_INLINE) {
   const rows = all("SELECT id,role,text FROM messages WHERE role IN ('owner','assistant') AND chat_id=? AND id < ? ORDER BY id DESC LIMIT ?", chatId, beforeId, limit);
   // rows are newest first here: recent attachments get the media budget first
   const items = rows.map((r, i) => {
-    const it = { role: r.role === 'owner' ? 'user' : 'assistant', text: String(r.text || '').slice(0, 6000) };
+    const it = { role: r.role === 'owner' ? 'user' : 'assistant', text: (r.role === 'owner' ? String(r.text || '') : withoutStatusEmoji(r.text)).slice(0, 6000) };   // 2.3.5: older replies lose a lone ✅ line too
     if (r.role === 'owner') {
       const files = filesOfMessage(r.id);
       if (files.length) {
@@ -594,7 +597,9 @@ async function runJob({ id, text, channel, meta, before, chatId, fileRows, paren
   }
   event(id, 'end', final.slice(0, 300));
   if (isHelper) return final;   // a helper's answer goes back to its parent job (helpers_wait), not to the chat
-  addMessage('assistant', channel, final, null, id);
+  // 2.3.5: a lone "✅" line typed into a WhatsApp reply is moved onto his message as a reaction (waagent.sendOwner);
+  // the chat keeps just the words, so the AI does not copy the habit from its own history.
+  addMessage('assistant', channel, channel === 'whatsapp_agent' ? withoutStatusEmoji(final) : final, null, id);
   // 2.2: pictures the assistant made in this job go to WhatsApp Agent too (as photos/files after the text).
   // (files that send_file already delivered to WhatsApp are not sent twice)
   const made = channel === 'whatsapp_agent' ? all("SELECT f.* FROM files f JOIN messages m ON m.id=f.message_id WHERE m.job_id=? AND m.role='assistant' AND (m.meta IS NULL OR m.meta NOT LIKE '%\"sent_file\"%')", id) : [];

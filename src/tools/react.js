@@ -5,7 +5,8 @@ import { audit } from '../db.js';
 
 export const react = {
   name: 'react',
-  description: 'React to the owner\'s WhatsApp message with one emoji (e.g. ❤️ for thanks or good news, 😂 for a joke, ✅ when a job he asked for is done). Replaces any earlier reaction on that message; an empty emoji removes it. Only works when he is writing from his WhatsApp agent chat. Most messages need no reaction; never react instead of answering.',
+  // 2.3.5: says plainly that this is the way to react, instead of typing ✅/👍 into the text.
+  description: 'React to his WhatsApp message with an emoji (shows on his message, like a person reacting). Use this instead of typing ✅/👍 in the text. E.g. ❤️ for thanks or good news, 😂 for a joke, ✅ when a job he asked for is done. Replaces any earlier reaction on that message; an empty emoji removes it. Only works when he is writing from his WhatsApp agent chat. Most messages need no reaction; never react instead of answering.',
   params: {
     emoji: { type: 'string', description: 'One emoji, like ❤️ 😂 ✅ 👍 (empty = remove the reaction)' },
     message_id: { type: 'string', description: 'Optional: the WhatsApp message id to react to. Leave empty for the message you are answering.' },

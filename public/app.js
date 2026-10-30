@@ -422,6 +422,15 @@ function fileView(f, generated) {
     h('a', { class: 'att-dl', href: fileUrl(f, true) }, '⬇ Download'));
   return h('a', { href: fileUrl(f, true), class: 'att att-file', 'data-sent': generated ? f.id : null }, icon + ' ' + f.name, h('small', {}, ' · ' + fmtSize(f.size) + (generated ? ' · ⬇' : '')));
 }
+// 2.3.5 (display only): an older reply that opens with a line holding just a status emoji ("✅", blank line, words)
+// shows without that line. The words are kept; a reply that is only an emoji is shown as it is.
+const LONE_STATUS = /^[ \t\u00A0]*(?:(?:[\u2705\u2611\u2714\u2764]\uFE0F?|(?:\u{1F44D}|\u{1F44C}|\u{1F64F})[\u{1F3FB}-\u{1F3FF}]?\uFE0F?|[\u{1F602}\u{1F440}\u{1F389}\u{1F525}]\uFE0F?)[ \t\u00A0]*){1,2}\r?\n(?:[ \t\u00A0]*\r?\n)*/u;
+function shownText(m) {
+  const t = String(m.text || '');
+  if (m.role !== 'assistant') return t;
+  const rest = t.replace(LONE_STATUS, '');
+  return rest !== t && rest.trim() ? rest : t;
+}
 function addBubble(m, approvalStatus) {
   const log = document.getElementById('log'); if (!log) return;
   log.querySelector('.empty')?.remove();
@@ -434,7 +443,7 @@ function addBubble(m, approvalStatus) {
     const voiceOnly = files.length && !m.text;
     const allVoice = files.length && (m.files || []).every(f => f.kind === 'audio');
     log.append(h('div', { class: 'bubble ' + (m.role === 'owner' ? 'owner' : m.role === 'assistant' ? 'assistant' : 'notice') + (files.length ? ' hasfiles' : '') + (allVoice && voiceOnly ? ' voice' : ''), 'data-msg': m.id || null },
-      files, voiceOnly ? null : (m.text ? h('div', { class: 'btext' }, m.text) : null), via));
+      files, voiceOnly ? null : (m.text ? h('div', { class: 'btext' }, shownText(m)) : null), via));
   }
 }
 function approvalCard(a, inChat) {
