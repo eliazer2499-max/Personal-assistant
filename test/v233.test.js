@@ -1,4 +1,4 @@
-// 2.3.3: WhatsApp Agent emoji reactions (automatic reaction on his message, the AI's react tool, the setting,
+// 2.3.3: WhatsApp Agent emoji reactions (2.3.4: run in the "Every message" mode, the 2.3.3 behaviour) (automatic reaction on his message, the AI's react tool, the setting,
 // failures that must not break the reply), against a mock of the WhatsApp Agent Platform and a fake model.
 // Not the real Meta service, his phone or his server.
 import test from 'node:test';
@@ -93,11 +93,12 @@ const replyArrives = (before, re) => until(() => textsAfter(before).find(t => re
 
 test.after(() => { waagent.stop(); server.close(); mock.close(); setTimeout(() => { fs.rmSync(T, { recursive: true, force: true }); process.exit(0); }, 200); });
 
-test('setup: key + enabled; React to my messages is on with 👍 by default and the status says so', async () => {
+test('setup: key + enabled; Reactions set to "Every message" (2.3.4: the 2.3.3 behaviour) with 👍 and the status says so', async () => {
   let r = await call('/api/wa-agent/key', { key: KEY }); assert.equal(r.status, 200);
   r = await call('/api/wa-agent', { enabled: true }); assert.equal(r.status, 200);
+  r = await call('/api/wa-agent/react', { mode: 'every' }); assert.equal(r.status, 200);
   r = await call('/api/wa-agent');
-  assert.equal(r.j.react, true); assert.equal(r.j.react_emoji, '👍'); assert.deepEqual(r.j.react_choices, ['👍', '👀', '❤️', '✅']);
+  assert.equal(r.j.react, true); assert.equal(r.j.react_mode, 'every'); assert.equal(r.j.react_emoji, '👍'); assert.deepEqual(r.j.react_choices, ['👍', '👀', '❤️', '✅']);
   await until(async () => (await call('/api/wa-agent')).j.state === 'connected', 8000, 'connected');
 });
 

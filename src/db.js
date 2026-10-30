@@ -132,7 +132,7 @@ export const DEFAULTS = {
   wa_app_id: '',
   wa_api_version: 'v23.0',
   wa_allow: '',
-  wa_agent_react: '1',              // 2.3.3: react to his WhatsApp Agent messages
+  wa_agent_react_mode: 'natural',   // 2.3.4: natural | every | off (the 2.3.3 'wa_agent_react' row is no longer read)
   wa_agent_react_emoji: '👍',       // 👍 👀 ❤️ ✅
   owner_emails: '',
   last_summary_day: '',

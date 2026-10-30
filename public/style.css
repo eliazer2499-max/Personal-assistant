@@ -274,7 +274,7 @@ body.noscroll{overflow:hidden}
 :root[data-theme="light"] .vp-bars i{background:rgba(17,26,36,.25)}
 :root[data-theme="light"] .bubble.owner .vp-time{color:#3d6676}
 :root[data-theme="light"] button.primary,:root[data-theme="light"] .send{color:#fff}
-:root[data-theme="light"] .seg button[aria-checked="true"]{color:#fff}
+:root[data-theme="light"] .seg button[aria-checked="true"]{color:#fff;background:var(--accent2)}
 :root[data-theme="light"] .sheetback{background:rgba(15,23,32,.35)}
 :root[data-theme="light"] .logo{box-shadow:none}
 @media (prefers-color-scheme:light){
@@ -284,7 +284,7 @@ body.noscroll{overflow:hidden}
 :root:not([data-theme="dark"]) .vp-bars i{background:rgba(17,26,36,.25)}
 :root:not([data-theme="dark"]) .bubble.owner .vp-time{color:#3d6676}
 :root:not([data-theme="dark"]) button.primary,:root:not([data-theme="dark"]) .send{color:#fff}
-:root:not([data-theme="dark"]) .seg button[aria-checked="true"]{color:#fff}
+:root:not([data-theme="dark"]) .seg button[aria-checked="true"]{color:#fff;background:var(--accent2)}
 :root:not([data-theme="dark"]) .sheetback{background:rgba(15,23,32,.35)}
 :root:not([data-theme="dark"]) .logo{box-shadow:none}
 }
@@ -312,3 +312,9 @@ body.noscroll{overflow:hidden}
 .usebox:has(input:disabled){cursor:not-allowed;opacity:1}
 .usebox:has(input:disabled)>:not(.usetext),.usebox:has(input:disabled) .usetext>:not(.usewhy){opacity:.5}
 .sheet .msg{white-space:pre-line}
+
+/* 2.3.4: Reactions — three-way control (Natural / Every message / Off) */
+.seg.seg3 button{display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.15;padding:6px 4px;min-width:0}
+.seg.seg3 .segl{font-size:14px}
+.seg.seg3 .segs{font-size:11.5px;opacity:.8;margin-top:2px}
+.seg.seg3 button[aria-checked="true"] .segs{opacity:.95}

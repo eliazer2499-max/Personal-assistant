@@ -97,7 +97,7 @@ export function status() {
     enabled: enabled(), has_key: hasKey(), state: enabled() ? st.state : 'off', error: enabled() ? st.error : '',
     creator_known: !!setting('wa_agent_creator'), last_in: n('wa_agent_last_in'), last_out: n('wa_agent_last_out'),
     queued: queue.length, since: st.since,
-    react: reactEnabled(), react_emoji: reactEmoji(), react_choices: REACT_CHOICES,
+    react: reactMode() !== 'off', react_mode: reactMode(), react_modes: REACT_MODES, react_emoji: reactEmoji(), react_choices: REACT_CHOICES,
   };
 }
 export function setEnabled(on) {
@@ -197,7 +197,14 @@ async function postMessage(payload, { needId = true } = {}) {
 // ---------------------------------------------------------------- reactions (2.3.3)
 export const REACT_CHOICES = ['👍', '👀', '❤️', '✅'];
 const WAMID_RE = /^[A-Za-z0-9._:=+\/-]{1,256}$/;
-export const reactEnabled = () => setting('wa_agent_react') !== '0';
+// 2.3.4: Settings → Channels → WhatsApp Agent → Reactions is one of three modes:
+//   natural — no automatic reaction; the assistant reacts now and then with the react tool, like a friend texting (default;
+//             2.3.3 installs move here too, whatever "React to my messages" was set to);
+//   every   — the 2.3.3 behaviour: every accepted message gets the chosen emoji (👍 👀 ❤️ ✅);
+//   off     — no reactions at all, the react tool included.
+export const REACT_MODES = ['natural', 'every', 'off'];
+export const reactMode = () => { const m = setting('wa_agent_react_mode'); return REACT_MODES.includes(m) ? m : 'natural'; };
+export const reactEnabled = () => reactMode() === 'every';   // the automatic reaction
 export const reactEmoji = () => { const e = setting('wa_agent_react_emoji'); return REACT_CHOICES.includes(e) ? e : '👍'; };
 /** One emoji, or '' (removes our reaction). */
 export function cleanEmoji(e) {
@@ -223,7 +230,7 @@ export async function reactTo(wamid, emoji) {
   await postMessage({ to, type: 'reaction', reaction: { message_id: id, emoji: e } }, { needId: false });
   return e;
 }
-/** Automatic reaction when one of his messages is accepted (setting: Channels → WhatsApp Agent → React to my messages). */
+/** Automatic reaction when one of his messages is accepted (Reactions = "Every message" only). */
 function autoReact(wamid) {
   if (!reactEnabled()) return;
   const e = reactEmoji();
@@ -232,14 +239,51 @@ function autoReact(wamid) {
     audit('system', 'wa_agent.react_failed', `automatic ${e}: ${err.message}`);
   });
 }
-export function setReact({ on, emoji } = {}) {
-  if (on !== undefined) setSetting('wa_agent_react', on ? '1' : '0');
+export function setReact({ mode, on, emoji } = {}) {
+  if (mode !== undefined) {
+    if (!REACT_MODES.includes(mode)) throw Object.assign(new Error('Pick one of: Natural, Every message, Off'), { status: 400 });
+    setSetting('wa_agent_react_mode', mode);
+  } else if (on !== undefined) setSetting('wa_agent_react_mode', on ? 'every' : 'off');   // 2.3.3 clients sent { on }
   if (emoji !== undefined) {
     if (!REACT_CHOICES.includes(emoji)) throw Object.assign(new Error('Pick one of ' + REACT_CHOICES.join(' ')), { status: 400 });
     setSetting('wa_agent_react_emoji', emoji);
   }
-  audit('owner', 'wa_agent.react', reactEnabled() ? 'on ' + reactEmoji() : 'off');
+  const m = reactMode();
+  audit('owner', 'wa_agent.react', m === 'every' ? 'every message ' + reactEmoji() : m === 'natural' ? 'natural (the assistant decides)' : 'off');
   return status();
+}
+
+// 2.3.4: which of his recent messages the assistant reacted to (for the Natural-mode cap). Oldest first, last 12.
+const RECENT_MAX = 12;
+function recentIn() { try { const a = JSON.parse(setting('wa_agent_react_recent') || '[]'); return Array.isArray(a) ? a.filter(x => x && typeof x.id === 'string') : []; } catch { return []; } }
+function saveRecent(a) { setSetting('wa_agent_react_recent', JSON.stringify(a.slice(-RECENT_MAX))); }
+export function noteInbound(wamid) { const a = recentIn().filter(x => x.id !== wamid); a.push({ id: wamid, r: false }); saveRecent(a); }
+function markReacted(wamid, on) { const a = recentIn(); const x = a.find(y => y.id === wamid); if (x) { x.r = !!on; saveRecent(a); } }
+/** True when the assistant already reacted to his 2 messages right before this one (so a 3rd in a row is skipped). */
+export function reactedTwiceBefore(wamid) {
+  const a = recentIn();
+  let i = a.findIndex(x => x.id === wamid);
+  if (i < 0) i = a.length;
+  if (a[i] && a[i].r) return false;                     // changing a reaction already on this message (👍 → ✅) is fine
+  const prev = a.slice(Math.max(0, i - 2), i);
+  return prev.length === 2 && prev.every(x => x.r);
+}
+/**
+ * The assistant's react tool. Off → refused. Natural → at most 2 of his messages in a row (a 3rd is skipped and the
+ * skip goes to Activity only). Every message → as in 2.3.3. Errors are thrown for the tool to report.
+ */
+export async function toolReact(wamid, emoji) {
+  const m = reactMode();
+  if (m === 'off') throw new WaErr('off_setting', 'reactions are turned off (Settings → Channels → WhatsApp Agent → Reactions)');
+  const e = cleanEmoji(emoji);
+  const id = String(wamid || '').trim();
+  if (m === 'natural' && e && reactedTwiceBefore(id)) {
+    audit('system', 'wa_agent.react_skipped', `skipped ${e}: already reacted to his last 2 messages in a row`);
+    return { skipped: true, emoji: e };
+  }
+  const sent = await reactTo(id, e);
+  markReacted(id, !!sent);
+  return { skipped: false, emoji: sent };
 }
 export async function markRead(wamid, typing = true) {
   if (!limits.statuses.tryAcquire()) throw new WaErr('rate', 'statuses: local budget used up');
@@ -444,7 +488,8 @@ async function handleInbound(m) {
   markSeen(wamid);
   setSetting('wa_agent_last_in', String(now()));
   setSetting('wa_agent_last_wamid', wamid);
-  autoReact(wamid);                                                  // 2.3.3: next to read + typing; never awaited
+  noteInbound(wamid);                                                // 2.3.4: for the Natural-mode cap
+  autoReact(wamid);                                                  // 2.3.3: only in "Every message" mode; never awaited
   const meta = { waa_wamid: wamid };
   if (type === 'text') {
     const t = typeof m.text?.body === 'string' ? m.text.body : '';

@@ -211,7 +211,7 @@ R('GET', /^\/api\/channels$/, () => ({
 // WhatsApp Agent (2.2): the key goes into the Vault (never sent back), a toggle starts/stops the long-poll worker.
 R('GET', /^\/api\/wa-agent$/, () => waagent.status());
 R('POST', /^\/api\/wa-agent$/, (c) => waagent.setEnabled(!!c.body.enabled));
-R('POST', /^\/api\/wa-agent\/react$/, (c) => waagent.setReact({ on: c.body.on === undefined ? undefined : !!c.body.on, emoji: c.body.emoji }));
+R('POST', /^\/api\/wa-agent\/react$/, (c) => waagent.setReact({ mode: c.body.mode, on: c.body.on === undefined ? undefined : !!c.body.on, emoji: c.body.emoji }));
 R('POST', /^\/api\/wa-agent\/key$/, (c) => { waagent.saveKey(c.body.key); return waagent.status(); });
 R('POST', /^\/api\/wa-agent\/key\/remove$/, () => { waagent.removeKey(); return waagent.status(); });
 R('POST', /^\/api\/wa-agent\/test$/, async () => {
