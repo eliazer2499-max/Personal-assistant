@@ -864,11 +864,21 @@ function waAgentCard(w) {
     const [t, cls] = waAgentStatusText(w); stat.textContent = t; stat.className = 'stat ' + cls;
     key.placeholder = w.has_key ? 'saved in Vault — paste to replace' : 'paste the API key';
     on.checked = w.enabled;
+    if (typeof paintReact === 'function' && document.activeElement !== rEmoji) paintReact();
     btns.replaceChildren(
       h('button', { class: 'primary', onclick: async (e) => { const x = await act(e.target, out, () => api('/api/wa-agent/key', { key: key.value }), w.enabled ? 'Key saved. Reconnecting…' : 'Key saved in your Vault. Now turn on “Enabled”.'); if (x) { key.value = ''; paint(x); } } }, 'Save key'),
       h('button', { disabled: !(w.enabled && w.creator_known), onclick: (e) => act(e.target, out, () => api('/api/wa-agent/test', {}), 'Sent. Look in your WhatsApp agent chat.') }, 'Send test'),
       w.has_key ? h('button', { class: 'danger small', onclick: async (e) => { if (!confirm('Remove the WhatsApp Agent key from the Vault?')) return; const x = await act(e.target, out, () => api('/api/wa-agent/key/remove', {}), 'Key removed.'); if (x) paint(x); } }, 'Remove key') : null);
   };
+  // 2.3.3: automatic reaction when it gets his message
+  const rOn = h('input', { type: 'checkbox', id: 'waareact' });
+  const rEmoji = h('select', { id: 'waaemoji', 'aria-label': 'Reaction emoji' }, (w.react_choices || ['👍', '👀', '❤️', '✅']).map(e => h('option', { value: e }, e)));
+  const rOut = msgEl();
+  const paintReact = () => { rOn.checked = w.react !== false; rEmoji.value = w.react_emoji || '👍'; rEmoji.disabled = !rOn.checked; };
+  const saveReact = async (el, body, ok) => { const x = await act(el, rOut, () => api('/api/wa-agent/react', body), ok); if (x) { w = x; } paintReact(); };
+  rOn.onchange = () => saveReact(rOn, { on: rOn.checked }, rOn.checked ? 'On. It reacts ' + rEmoji.value + ' when it gets your message.' : 'Off. No automatic reaction.');
+  rEmoji.onchange = () => saveReact(rEmoji, { emoji: rEmoji.value }, 'Saved. It reacts ' + rEmoji.value + '.');
+  paintReact();
   on.onchange = async () => { const x = await act(on, out, () => api('/api/wa-agent', { enabled: on.checked }), on.checked ? 'Turned on. Connecting…' : 'Turned off.'); if (x) paint(x); else on.checked = !on.checked; };
   card.append(h('h3', {}, 'WhatsApp Agent (new — free, in your own WhatsApp)'), stat,
     h('ol', { class: 'steps' },
@@ -879,6 +889,10 @@ function waAgentCard(w) {
     h('label', { for: 'waakey' }, 'API key (kept encrypted in your Vault, never shown again)'), key,
     h('div', { class: 'switch', style: 'margin-top:10px' }, h('label', { for: 'waaon', style: 'margin:0;color:var(--text)' }, 'Enabled'), on),
     btns, out,
+    h('div', { class: 'switch', style: 'margin-top:14px' }, h('label', { for: 'waareact', style: 'margin:0;color:var(--text)' }, 'React to my messages'), rOn),
+    h('div', { class: 'row', style: 'margin-top:8px;align-items:center;gap:10px' }, h('label', { for: 'waaemoji', style: 'margin:0' }, 'Reaction'), rEmoji),
+    h('p', { class: 'fine', style: 'margin-top:6px' }, 'When it gets your message it reacts with this emoji. The assistant may change it to ❤️, 😂 or ✅ when that fits (✅ = done).'),
+    rOut,
     h('p', { class: 'fine' }, 'Only you (the agent’s creator) can chat with it. Reminders, morning summary and approval requests also go there. Approve by tapping Approve in this app, or reply “YES A12”. WhatsApp allows 12 messages a minute, so long answers may take a moment. Messages there are not end-to-end encrypted.'));
   paint(w);
   // keep the status fresh while this page is open

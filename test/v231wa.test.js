@@ -35,7 +35,8 @@ const mock = http.createServer(async (req, res) => {
     return J({ object: 'whatsapp_agent_platform', entry: [{ id: '1', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', messages: items.map(x => x.message) } }] }], next_offset: items.at(-1).seq + 1 });
   }
   if (p === '/agent/v1/statuses') return J({ success: true });
-  if (p === '/agent/v1/messages') { const j = JSON.parse(body); AP.sent.push(j); return J({ messaging_product: 'whatsapp', messages: [{ id: 'wamid.out' + AP.sent.length }] }); }
+  if (p === '/agent/v1/messages') { const j = JSON.parse(body); if (j.type === 'reaction') { (AP.reactions ||= []).push(j); return J({ messaging_product: 'whatsapp', messages: [{ id: 'wamid.react' + AP.reactions.length }] }); }   // 2.3.3: automatic 👍, counted apart from files/texts
+    AP.sent.push(j); return J({ messaging_product: 'whatsapp', messages: [{ id: 'wamid.out' + AP.sent.length }] }); }
   if (p === '/agent/v1/media' && req.method === 'POST') {
     const s = body.toString('latin1');
     AP.uploads.push({ type: /name="type"\r\n\r\n([^\r]*)/.exec(s)?.[1], filename: /filename="([^"]*)"/.exec(s)?.[1], size: body.length });

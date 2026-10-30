@@ -13,6 +13,8 @@
 //             (text ≤ 4096 UTF-16 units; we split at 4000)
 //   read/typing POST /statuses {messaging_product, status:"read", message_id, typing_indicator:{type:"text"}} → success.
 //             Meta accepts it only for the creator's own messages (403/131005 otherwise): that is how the creator is confirmed.
+//   reaction  POST /messages {messaging_product, to, type:"reaction", reaction:{message_id, emoji}} (2.3.3; emoji "" removes it).
+//             One reaction per message: a new one replaces the old (so ✅ replaces the automatic 👍).
 //   media in  GET /media/<id> → {url, mime_type, sha256 (hex), file_size}; GET url with the same Bearer, no redirects.
 //   media out POST /media multipart (messaging_product, type, file) → {id}; POST /messages {type:"image", image:{id, caption}}
 //   limits    per agent, rolling 60 s: messages 12, statuses 12, media 12, updates 15 (we poll ≤ 14/min).
@@ -95,6 +97,7 @@ export function status() {
     enabled: enabled(), has_key: hasKey(), state: enabled() ? st.state : 'off', error: enabled() ? st.error : '',
     creator_known: !!setting('wa_agent_creator'), last_in: n('wa_agent_last_in'), last_out: n('wa_agent_last_out'),
     queued: queue.length, since: st.since,
+    react: reactEnabled(), react_emoji: reactEmoji(), react_choices: REACT_CHOICES,
   };
 }
 export function setEnabled(on) {
@@ -180,15 +183,63 @@ export async function getUpdates(offset, timeout) {
   }
   return { next_offset: j.next_offset, messages };
 }
-async function postMessage(payload) {
+async function postMessage(payload, { needId = true } = {}) {
   await limits.messages.acquire();
   let r;
   try { r = await request('POST', '/messages', 'send', { json: { messaging_product: 'whatsapp', ...payload }, timeoutMs: 60000, write: true }); }
   catch (e) { if (e.kind === 'rate') limits.messages.penalize(e.retryAfter ?? 10); throw e; }
   const j = await r.json().catch(() => ({}));
   const id = j?.messages?.[0]?.id;
-  if (typeof id !== 'string' || !id) throw new WaErr('malformed', 'send: answer without a message id');
+  if (typeof id !== 'string' || !id) { if (!needId) return ''; throw new WaErr('malformed', 'send: answer without a message id'); }
   return id;
+}
+
+// ---------------------------------------------------------------- reactions (2.3.3)
+export const REACT_CHOICES = ['👍', '👀', '❤️', '✅'];
+const WAMID_RE = /^[A-Za-z0-9._:=+\/-]{1,256}$/;
+export const reactEnabled = () => setting('wa_agent_react') !== '0';
+export const reactEmoji = () => { const e = setting('wa_agent_react_emoji'); return REACT_CHOICES.includes(e) ? e : '👍'; };
+/** One emoji, or '' (removes our reaction). */
+export function cleanEmoji(e) {
+  const s = String(e ?? '').trim();
+  if (!s) return '';
+  if (s.length > 16 || /[\s<>"'`\\]/.test(s) || /^[\x20-\x7e]+$/.test(s)) throw Object.assign(new Error('Give one emoji, like 👍 ❤️ 😂 ✅ (or empty to remove the reaction).'), { kind: 'bad_emoji' });
+  let n = 0; try { n = [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(s)].length; } catch { n = 1; }
+  if (n !== 1) throw Object.assign(new Error('Give exactly one emoji.'), { kind: 'bad_emoji' });
+  return s;
+}
+/**
+ * React to one of his WhatsApp messages with an emoji ('' removes our reaction). Same /messages endpoint, auth,
+ * error handling and 12-a-minute budget as text. Never waits for the budget: if it is full the reaction is skipped,
+ * so a reaction can never hold up a reply.
+ */
+export async function reactTo(wamid, emoji) {
+  const id = String(wamid || '').trim();
+  if (!WAMID_RE.test(id)) throw new WaErr('bad_ref', 'no WhatsApp message to react to');
+  const e = cleanEmoji(emoji);
+  const to = setting('wa_agent_creator');
+  if (!enabled() || !hasKey() || !to) throw new WaErr('off', 'WhatsApp Agent is not connected');
+  if (limits.messages.delay() > 0) throw new WaErr('rate', 'skipped: WhatsApp\'s 12-a-minute limit is full right now');
+  await postMessage({ to, type: 'reaction', reaction: { message_id: id, emoji: e } }, { needId: false });
+  return e;
+}
+/** Automatic reaction when one of his messages is accepted (setting: Channels → WhatsApp Agent → React to my messages). */
+function autoReact(wamid) {
+  if (!reactEnabled()) return;
+  const e = reactEmoji();
+  reactTo(wamid, e).catch((err) => {
+    log('wa agent react', err.message);
+    audit('system', 'wa_agent.react_failed', `automatic ${e}: ${err.message}`);
+  });
+}
+export function setReact({ on, emoji } = {}) {
+  if (on !== undefined) setSetting('wa_agent_react', on ? '1' : '0');
+  if (emoji !== undefined) {
+    if (!REACT_CHOICES.includes(emoji)) throw Object.assign(new Error('Pick one of ' + REACT_CHOICES.join(' ')), { status: 400 });
+    setSetting('wa_agent_react_emoji', emoji);
+  }
+  audit('owner', 'wa_agent.react', reactEnabled() ? 'on ' + reactEmoji() : 'off');
+  return status();
 }
 export async function markRead(wamid, typing = true) {
   if (!limits.statuses.tryAcquire()) throw new WaErr('rate', 'statuses: local budget used up');
@@ -392,6 +443,8 @@ async function handleInbound(m) {
   if (!(await authorize(from, wamid))) { markSeen(wamid); log('wa agent: dropped a message from someone who is not the agent\'s creator'); return; }
   markSeen(wamid);
   setSetting('wa_agent_last_in', String(now()));
+  setSetting('wa_agent_last_wamid', wamid);
+  autoReact(wamid);                                                  // 2.3.3: next to read + typing; never awaited
   const meta = { waa_wamid: wamid };
   if (type === 'text') {
     const t = typeof m.text?.body === 'string' ? m.text.body : '';

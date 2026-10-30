@@ -132,6 +132,8 @@ export const DEFAULTS = {
   wa_app_id: '',
   wa_api_version: 'v23.0',
   wa_allow: '',
+  wa_agent_react: '1',              // 2.3.3: react to his WhatsApp Agent messages
+  wa_agent_react_emoji: '👍',       // 👍 👀 ❤️ ✅
   owner_emails: '',
   last_summary_day: '',
   last_backup_day: '',

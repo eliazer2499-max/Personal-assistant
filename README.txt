@@ -20,6 +20,13 @@ NEW IN 2.1
 - Before the database changes for 2.1, a full copy is saved in
   /var/lib/myassistant/backups/pre-2.1.0-<time>.db (kept, never auto-deleted).
 
+2.3.3
+- WhatsApp Agent reactions: when it gets your message it reacts 👍 right away
+  (Settings → Channels → WhatsApp Agent → "React to my messages", emoji
+  👍 👀 ❤️ ✅). The assistant can also react ❤️ / 😂 / ✅ when it fits, for
+  example ✅ when a job you asked for is done. A failed reaction never stops
+  the reply; it is written to the Activity log.
+
 2.3.2
 - Test checks what each model can do: Settings → Brain → tap a key → Test.
   It sends the model a tiny photo, a half-second sound, a one-word PDF and a
