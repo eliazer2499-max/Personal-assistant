@@ -429,13 +429,16 @@ export async function testKey(id) {
   const k = aikeys.keyRow(id);
   if (!k) throw aikeys.httpErr(404, 'That key was removed');
   const key = aikeys.keyValue(k.id);
-  return runKeyTest(k, key, {
+  const r = await runKeyTest(k, key, {
     onFail: (c) => aikeys.markFail(k.id, c, { fromTest: true }),
     onOk: () => aikeys.markTested(k.id),
     caps: (model, all, extra) => testCaps(k, key, model, all, extra),
     noKey: '✗ No key saved — paste it and tap Save.',
     noModel: '✗ No model chosen — tap one from the list below, then Save.',
   });
+  // 2.3.12: a Cloudflare key's picture models are kept for Auto (refreshed at most once a day when pictures are made)
+  if (k.kind === 'cloudflare' && Array.isArray(r.models) && r.models.length) (await import('./cloudflare.js')).cfSaveModels(k.id, r.models);
+  return r;
 }
 
 /**

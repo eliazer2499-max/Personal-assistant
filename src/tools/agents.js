@@ -65,10 +65,12 @@ async function imageModels(key) {
 }
 const imageGenerate = {
   name: 'image_generate',
-  description: 'Create a picture from a description (or change the last photo the owner sent in this chat, with use_last_image). The picture is shown to the owner in the chat right away and can be downloaded.',
-  params: { prompt: S('What the picture should show, in detail (style, colours, text on it, …)'), use_last_image: { type: 'boolean', description: 'true = edit/transform the most recent image the owner sent in this chat' } },
+  description: 'Create a picture from a description (or change the last photo the owner sent in this chat, with use_last_image). The picture is shown to the owner in the chat right away and can be downloaded. quality: use "best" when he wants a high-quality or detailed picture (portraits, text in the picture, posters, something to print or share); use "fast" for quick or simple pictures, or when making several variations; leave it out (= "auto") otherwise. You never need model names: the code picks the model and switches by itself.',
+  params: { prompt: S('What the picture should show, in detail (style, colours, text on it, …)'), use_last_image: { type: 'boolean', description: 'true = edit/transform the most recent image the owner sent in this chat' },
+    quality: S('"best" = high quality / detailed (portraits, text in the picture, posters); "fast" = quick or simple, or several variations; "auto" = let the code choose (default)', { enum: ['best', 'fast', 'auto'] }) },
   required: ['prompt'],
-  run: async ({ prompt, use_last_image }, ctx = {}) => {
+  run: async ({ prompt, use_last_image, quality }, ctx = {}) => {
+    quality = ['best', 'fast', 'auto'].includes(quality) ? quality : 'auto';      // 2.3.12
     const aikeys = await import('../aikeys.js');
     let keyList = aikeys.geminiKeys().filter(k => k.key);
     if (!keyList.length && secret('gemini_api_key')) keyList = [{ id: 0, name: 'Gemini', key: secret('gemini_api_key') }];
@@ -140,18 +142,35 @@ const imageGenerate = {
     const errs = [];
     for (const k of others) {
       if (k.kind === 'cloudflare') {        // 2.3.11: his own Cloudflare account (Workers AI, free daily amount)
-        const { cfGenerate } = await import('../cloudflare.js');
-        const g = await cfGenerate({ accountId: k.base_url, token: k.key, model: k.model, prompt: String(prompt).slice(0, 2048) });
-        if (g.ok) {
-          const why = (geminiError ? ' (Gemini could not: ' + geminiError.slice(0, 120) + ')' : '') + (errs.length ? ' (before it: ' + errs.join('; ').slice(0, 160) + ')' : '');
+        const cf = await import('../cloudflare.js');
+        const auto = k.model === cf.CF_AUTO;
+        // 2.3.12: Auto = the code picks the model for the quality the main AI asked for, and switches when one fails
+        let plan = { order: [k.model], why: '' };
+        if (auto) plan = cf.cfPlan({ quality, available: await cf.cfModelsFor({ keyId: k.id, accountId: k.base_url, token: k.key }), usedToday: cf.cfUsedToday(k.id) });
+        const tried = [];
+        let g = null;
+        for (const model of plan.order.slice(0, auto ? 4 : 1)) {
+          g = await cf.cfGenerate({ accountId: k.base_url, token: k.key, model, prompt: String(prompt).slice(0, 2048) });
+          if (g.ok) break;
+          if (g.usedUp) cf.cfMarkUsedUp(k.id);
+          if (!auto || g.keyLevel || g.network) break;          // hard quota / refused key / no answer → next key, as before
+          tried.push({ model, message: String(g.message).replace(/^Cloudflare picture failed \((.*)\)\.?$/, '$1') });             // this model failed (unavailable, bad input, 5xx) → next model, same key
+          log('picture: Cloudflare model', cf.shortModel(model), 'failed; trying the next model');
+        }
+        if (g && g.ok) {
+          cf.cfAddUsage(k.id, cf.cfCost(g.model));
+          const modelWhy = !auto ? '' : tried.length ? 'switched: ' + tried.map(t => cf.shortModel(t.model) + ' failed (' + String(t.message).slice(0, 80) + ')').join('; ') : plan.why;
+          const why = (auto ? ` — Auto: ${cf.shortModel(g.model)} (${modelWhy})` : '') + (geminiError ? ' (Gemini could not: ' + geminiError.slice(0, 120) + ')' : '') + (errs.length ? ' (before it: ' + errs.join('; ').slice(0, 160) + ')' : '');
           const out = finish(k, g.model, g.mime, g.buf, '', why);
           out.made_with = `${k.name} (Cloudflare, ${g.model})`;
-          out.note += ` Made with his Cloudflare key "${k.name}"` + (geminiError ? ' because Gemini could not make it (' + geminiError.slice(0, 100) + ')' : '') + '. Tell him which one made it in a few words.' + (lastImg ? ' Cloudflare makes new pictures only, so his photo was not used.' : '');
+          if (auto) { out.model_why = modelWhy; out.quality = quality; out.free_today = cf.cfFreeToday(k.id, k.model, cf.cfCachedModels(k.id)).text; }
+          out.note += ` Made with his Cloudflare key "${k.name}"` + (geminiError ? ' because Gemini could not make it (' + geminiError.slice(0, 100) + ')' : '') + (auto ? `, model ${cf.shortModel(g.model)} (${modelWhy})` : '') + '. Tell him which one made it in a few words.' + (lastImg ? ' Cloudflare makes new pictures only, so his photo was not used.' : '');
           return out;
         }
-        errs.push(`"${k.name}" (Cloudflare): ${g.message}`);
-        log('picture: key', k.name, 'failed:', String(g.message).slice(0, 200));
-        if (k.id && (g.limit || g.keyProblem)) {
+        const msg = tried.length && g && !(g.keyLevel || g.network) ? 'every model failed: ' + tried.map(t => cf.shortModel(t.model) + ': ' + String(t.message).slice(0, 80)).join('; ') : (tried.length ? tried.map(t => cf.shortModel(t.model) + ' failed').join('; ') + '; then ' : '') + g.message;
+        errs.push(`"${k.name}" (Cloudflare): ${msg}`);
+        log('picture: key', k.name, 'failed:', String(msg).slice(0, 200));
+        if (k.id && (g.limit || g.keyProblem) && (!auto || g.keyLevel)) {
           const d = new Date(); const nextUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
           aikeys.markFail(k.id, { reason: String(g.message).slice(0, 280), until: g.limit && /free pictures for today/.test(g.message) ? nextUtc : g.limit ? Date.now() + 60000 : 0, problem: g.keyProblem ? 'Cloudflare refused this key — tap Test' : null });
         }

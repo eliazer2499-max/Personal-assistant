@@ -28,7 +28,11 @@ export function png(w = 8, h = 8, rgb = [200, 60, 40]) {
 
 export const MODELS = ['@cf/black-forest-labs/flux-1-schnell', '@cf/bytedance/stable-diffusion-xl-lightning', '@cf/black-forest-labs/flux-2-klein-4b', '@cf/leonardo/phoenix-1.0'];
 
-export async function startMockCloudflare() {
+// 2.3.12: opts.models = the account's picture models (default MODELS); FAIL[model] = how that model fails right now:
+// 'down' (500), 'bad' (400 bad input), 'gone' (5007 no such model), 'busy' (3040 capacity), 'quota' (3036 for the whole key)
+export async function startMockCloudflare(opts = {}) {
+  const LIST = opts.models || MODELS;
+  const FAIL = {};
   const SEEN = [];      // { path, token, body }
   const srv = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
@@ -61,14 +65,20 @@ export async function startMockCloudflare() {
     if (!okAcct || token === TOK.noperm) return authErr();
     if (rest === 'ai/models/search') {
       const task = u.searchParams.get('task');
-      const all = [...MODELS.map(n => ({ name: n, task: { name: 'Text-to-Image' } })), { name: '@cf/meta/llama-3.1-8b-instruct', task: { name: 'Text Generation' } }];
+      const all = [...LIST.map(n => ({ name: n, task: { name: 'Text-to-Image' } })), { name: '@cf/meta/llama-3.1-8b-instruct', task: { name: 'Text Generation' } }];
       return J({ result: all.filter(x => !task || x.task.name === task) });
     }
     const run = /^ai\/run\/(.+)$/.exec(rest);
     if (run && req.method === 'POST') {
       const model = run[1];
       if (token === TOK.quota) return J({ success: false, errors: [{ code: 3036, message: "AiError: You have used up your daily free allocation of 10,000 neurons. Please upgrade to Cloudflare's Workers Paid plan if you would like to continue usage." }] }, 429);
-      if (!MODELS.includes(model)) return J({ success: false, errors: [{ code: 5007, message: 'No such model ' + model + ' or task' }] }, 400);
+      const f = FAIL[model];
+      if (f === 'down') return J({ success: false, errors: [{ code: 3043, message: 'AiError: Internal server error' }] }, 500);
+      if (f === 'bad') return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: prompt too long for this model' }] }, 400);
+      if (f === 'gone') return J({ success: false, errors: [{ code: 5007, message: 'No such model ' + model + ' or task' }] }, 400);
+      if (f === 'busy') return J({ success: false, errors: [{ code: 3040, message: 'Capacity temporarily exceeded, please try again.' }] }, 429);
+      if (f === 'quota') return J({ success: false, errors: [{ code: 3036, message: 'AiError: You have used up your daily free allocation of 10,000 neurons.' }] }, 429);
+      if (!LIST.includes(model)) return J({ success: false, errors: [{ code: 5007, message: 'No such model ' + model + ' or task' }] }, 400);
       const multipart = String(req.headers['content-type'] || '').startsWith('multipart/form-data');
       if (model.includes('/flux-2-')) {
         if (!multipart) return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: request must be multipart/form-data' }] }, 400);
@@ -77,7 +87,7 @@ export async function startMockCloudflare() {
       }
       let j = {}; try { j = JSON.parse(body); } catch {}
       if (!j.prompt) return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: must have required property prompt' }] }, 400);
-      if (model.includes('flux-1-schnell')) return J({ result: { image: png(16, 16, [200, 60, 40]).toString('base64') } });
+      if (model.includes('flux-1-schnell') || model.includes('lucid-origin')) return J({ result: { image: png(16, 16, [200, 60, 40]).toString('base64') } });
       // stable-diffusion / phoenix: raw bytes
       res.writeHead(200, { 'Content-Type': 'image/png' }); return res.end(png(16, 16, [40, 60, 200]));
     }
@@ -85,5 +95,5 @@ export async function startMockCloudflare() {
   });
   await new Promise(r => srv.listen(0, '127.0.0.1', r));
   const url = 'http://127.0.0.1:' + srv.address().port + '/client/v4';
-  return { url, SEEN, close: () => new Promise(r => srv.close(r)) };
+  return { url, SEEN, FAIL, close: () => new Promise(r => srv.close(r)) };
 }

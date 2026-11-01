@@ -4,7 +4,7 @@
 // (name "ai_key_<id>"), exactly like every other secret; this table only holds names and status.
 import { cfg } from './config.js';
 import { db, all, get, run, now, setting, setSetting, secret, setSecret, hasSecret, audit, log, redact, DEFAULTS } from './db.js';
-import { cleanAccountId, cleanCfModel, CF_DEFAULT_MODEL, ACCOUNT_ID_HELP } from './cloudflare.js';
+import { cleanAccountId, cleanCfModel, CF_DEFAULT_MODEL, ACCOUNT_ID_HELP, CF_AUTO, CF_AUTO_LABEL, cfFreeToday, cfCachedModels, cfForgetKey } from './cloudflare.js';
 
 export const GROQ_BASE = 'https://api.groq.com/openai/v1';
 export const GROQ_MODEL = 'openai/gpt-oss-120b';
@@ -179,7 +179,7 @@ function moveToTop(id) {
 export function httpErr(status, message) { const e = new Error(message); e.status = status; return e; }
 function cleanName(v) { const s = String(v ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 80); if (!s) throw httpErr(400, 'Give the key a name, e.g. "Gemini – project 2"'); return s; }
 function cleanModel(v, kind) {
-  if (kind === 'cloudflare') { const m = cleanCfModel(v); if (!m) throw httpErr(400, 'Cloudflare picture models look like ' + CF_DEFAULT_MODEL + ' (tap Test to see the list)'); return m; }
+  if (kind === 'cloudflare') { const m = cleanCfModel(v); if (!m) throw httpErr(400, 'Cloudflare picture models look like ' + CF_DEFAULT_MODEL + ', or choose Auto (tap Test to see the list)'); return m; }
   const s = String(v ?? '').trim().replace(/^models\//, '').slice(0, 200);
   if (!s) { if (kind === 'gemini') return ''; throw httpErr(400, 'Type the model name (tap Test to see the list)'); }
   if (!/^[A-Za-z0-9][A-Za-z0-9._\-\/:@]*$/.test(s)) throw httpErr(400, 'Model names look like gemini-3.6-flash or openai/gpt-oss-120b');
@@ -211,7 +211,8 @@ export function publicKey(r) {
     resting_until: r.cool_until > t ? r.cool_until : null, resting_until_text: r.cool_until > t ? clock(r.cool_until) : null,
     effective_model: effModel(r),
     use_for: usesOf(r), caps: capsOf(r), caps_fresh: !!freshCaps(r), use_support: useSupport(r),
-    in_use: String(r.id) === setting('ai_key_in_use') };
+    in_use: String(r.id) === setting('ai_key_in_use'),
+    ...(r.kind === 'cloudflare' ? { auto: effModel(r) === CF_AUTO, model_label: effModel(r) === CF_AUTO ? CF_AUTO_LABEL : effModel(r), free_today: cfFreeToday(r.id, effModel(r), cfCachedModels(r.id)) } : {}) };      // 2.3.12
 }
 export function listKeys() { return listRows().map(publicKey); }
 
@@ -276,6 +277,7 @@ export function updateKey(id, b) {
 export function removeKey(id) {
   const r = keyRow(id); if (!r) throw httpErr(404, 'That key was removed');
   run('DELETE FROM ai_keys WHERE id=?', r.id);
+  if (r.kind === 'cloudflare') cfForgetKey(r.id);      // 2.3.12: its picture counter and model list go too
   setSecret(SEC(r.id), '');
   if (String(r.id) === setting('ai_key_main_id')) { setSecret('gemini_api_key', ''); setSetting('ai_key_main_id', ''); }
   if (String(r.id) === setting('ai_key_in_use')) setSetting('ai_key_in_use', '');

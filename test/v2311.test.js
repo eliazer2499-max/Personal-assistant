@@ -118,7 +118,7 @@ test('version 2.3.11 is newer than 2.3.10 (numbers, not text)', () => {
   assert.equal(updates.cmpVer('2.3.11', '2.3.10'), 1);
   assert.equal(updates.cmpVer('2.3.10', '2.3.11'), -1);
   assert.equal(updates.cmpVer('2.3.11', '2.3.9'), 1);
-  assert.equal(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version, '2.3.11');
+  assert.ok(updates.cmpVer(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version, '2.3.11') >= 0, 'package.json is 2.3.11 or newer');
 });
 
 test('Test (unsaved Cloudflare key): token OK + Workers AI → picture models as chips; no picture made, nothing saved', async () => {

@@ -721,10 +721,11 @@ async function brainView(body) {
       h('span', { class: 'knum' }, String(i + 1)),
       h('span', { class: 'kbody' },
         h('span', { class: 'kname' }, h('b', {}, k.name)),
-        h('span', { class: 'ksub' }, (k.kind_label || (k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible')) + ' · ', h('span', { class: 'mono' }, k.effective_model || 'no model')),
+        h('span', { class: 'ksub' }, (k.kind_label || (k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible')) + ' · ', h('span', { class: k.auto ? '' : 'mono' }, k.auto ? 'Auto (best model)' : (k.effective_model || 'no model'))),
         h('span', { class: 'ktags' }, h('span', { class: 'pill ' + cls, 'data-status': k.id }, st),
           k.use_for.length ? k.use_for.map(u => h('span', { class: 'tag', 'data-tag': u }, USE_SHORT[u])) : h('span', { class: 'tag none' }, 'Not used for anything')),
-        problem ? h('span', { class: 'fine kline' }, problem) : null),
+        problem ? h('span', { class: 'fine kline' }, problem) : null,
+        k.free_today && k.active ? h('span', { class: 'fine kline', 'data-cffree': k.id }, k.free_today.text) : null),      // 2.3.12
       h('span', { class: 'kside' }, h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
   }
 
@@ -748,6 +749,17 @@ async function brainView(body) {
     const acctWrap = h('div', { 'data-acct': '1' }, h('label', {}, 'Account ID'), acct);
     const keyLabel = h('label', {}, 'Key');
     const CF_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+    // 2.3.12: Auto (the default for new Cloudflare keys): the assistant picks the model for each picture and switches by itself
+    const CF_AUTO = 'auto', CF_AUTO_LABEL = 'Auto (best model, switches by itself)';
+    const autoWrap = h('div', { class: 'cfauto', 'data-cfauto': '1' });
+    const paintAuto = () => {
+      const on = kmodel.value.trim().toLowerCase() === CF_AUTO;
+      autoWrap.replaceChildren(
+        h('div', { class: 'kmodels' }, h('button', { type: 'button', class: 'chip' + (on ? ' on' : ''), 'data-model': CF_AUTO, onclick: () => pickModel(CF_AUTO) }, (on ? '✓ ' : '') + CF_AUTO_LABEL)),
+        h('p', { class: 'fine' }, on ? 'Your assistant picks the best picture model for each request, and switches to another one if a model fails or the free amount runs low.' : 'Or tap a model below to always use that one.'),
+        k && k.kind === 'cloudflare' && k.free_today ? h('p', { class: 'fine cffree', 'data-cffree': k.id }, k.free_today.text) : null);
+    };
+    kmodel.addEventListener('input', () => { if (kind.value === 'cloudflare') paintAuto(); });
     const act1 = h('input', { type: 'checkbox', 'data-f': 'active', 'data-active': k ? k.id : 'new', id: 'kactive' }); act1.checked = k ? k.active : true;
     if (k) act1.onchange = async () => { try { const x = await api(`/api/brain/keys/${k.id}`, { active: act1.checked }); k = x.key; paintKeys({ ...K, keys: x.keys }); say(o, act1.checked ? 'Switched on.' : 'Switched off.', true); } catch (e) { say(o, e.message); act1.checked = !act1.checked; } };
     const baseWrap = h('div', {}, h('label', {}, 'API base URL'), base);
@@ -795,14 +807,15 @@ async function brainView(body) {
       const v = kind.value; baseWrap.hidden = v !== 'openai'; acctWrap.hidden = v !== 'cloudflare';
       keyLabel.textContent = v === 'cloudflare' ? 'API token' : 'Key';
       if (!(k && k.has_key)) kkey.placeholder = v === 'cloudflare' ? 'paste the API token' : 'paste the key';
-      if (v === 'cloudflare' && fromUser && (!kmodel.value || isNew || (k && k.kind !== 'cloudflare'))) kmodel.value = CF_MODEL;
-      if (v !== 'cloudflare' && fromUser && kmodel.value.startsWith('@cf/')) kmodel.value = '';
+      if (v === 'cloudflare' && fromUser && (!kmodel.value || isNew || (k && k.kind !== 'cloudflare'))) kmodel.value = CF_AUTO;      // 2.3.12: Auto by default
+      autoWrap.hidden = v !== 'cloudflare'; paintAuto();
+      if (v !== 'cloudflare' && fromUser && (kmodel.value.startsWith('@cf/') || kmodel.value === CF_AUTO)) kmodel.value = '';
       base.placeholder = v === 'openai' ? 'https://openrouter.ai/api/v1' : 'https://…/v1';   // 2.3.9: the usual address for OpenRouter
       if (v === 'groq' && fromUser) { base.value = K.groq.base_url; if (!kmodel.value || isNew) kmodel.value = K.groq.model; }
       if (v === 'openai' && fromUser && base.value === K.groq.base_url) base.value = '';
       if (fromUser && isNew) setUses(defaultsFor(v));
       applySupport();
-      kmodel.placeholder = v === 'gemini' ? 'empty = default (' + (K.default_model || 'gemini-3.6-flash') + ')' : v === 'groq' ? K.groq.model : v === 'cloudflare' ? CF_MODEL : 'model name (tap Test to see the list)';
+      kmodel.placeholder = v === 'gemini' ? 'empty = default (' + (K.default_model || 'gemini-3.6-flash') + ')' : v === 'groq' ? K.groq.model : v === 'cloudflare' ? CF_AUTO : 'model name (tap Test to see the list)';
       help.replaceChildren(...(v === 'gemini' ? ['Get a free key: ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener' }, 'aistudio.google.com/apikey'), ' → Create API key. A key from another Google project has its own free limit.']
         : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. Tap Test: it checks the key and what the model can do (most Groq models can\'t hear voice notes or see photos). No need to save first.']
           : v === 'cloudflare' ? [h('b', {}, 'Free: '), 'Cloudflare gives a small amount of pictures each day. 1) ', h('a', { href: 'https://dash.cloudflare.com', target: '_blank', rel: 'noopener' }, 'dash.cloudflare.com'), ' → sign up. 2) Copy Account ID (right side of the account home page). 3) My Profile → API Tokens → Create Token → \u2018Workers AI\u2019 template → Create → copy. Paste both here, tap Test.']
@@ -811,9 +824,17 @@ async function brainView(body) {
     kind.onchange = () => sync(true); sync(isNew);
     const models = h('div', { class: 'kmodelswrap' });
     let draftMode = false;     // 2.3.9: the list came from a Test of unsaved values → a tap only fills the Model field
+    // 2.3.12: one way to choose a model (a chip or Auto): fill the field, and save it right away on a saved key
+    const pickModel = async (m) => {
+      kmodel.value = m; paintAuto();
+      if (!isNew && !draftMode) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); paintAuto(); say(to, m === CF_AUTO ? 'Auto is on: your assistant picks the model for each picture. Tap Test to check it.' : `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } }
+      showModels(lastList);
+    };
+    let lastList = [];
     const showModels = (list) => {
+      lastList = list || [];
       models.replaceChildren(...(list && list.length ? [h('p', { class: 'fine' }, kind.value === 'cloudflare' ? 'Picture models on your Cloudflare account — tap one to choose it:' : 'Models this key can use — tap one to choose it:'), h('div', { class: 'kmodels' }, list.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === (kmodel.value || k?.effective_model) ? ' on' : ''), 'data-model': m,
-        onclick: async () => { kmodel.value = m; if (!isNew && !draftMode) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); say(to, `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } } showModels(list); } }, m)))] : []));
+        onclick: () => pickModel(m) }, m)))] : []));
     };
     if (k && testOut[k.id]) { say(to, testMsg(testOut[k.id]), testOut[k.id].ok); showModels(testOut[k.id].models); }
     const body = () => {
@@ -849,7 +870,7 @@ async function brainView(body) {
       if (x) {
         draftMode = false; draft = null;
         testOut[k.id] = x; showModels(x.models);
-        if (x.key) { k = x.key; if (x.caps) setUses(k.use_for); applySupport(); }     // ticks what it can do, greys out the rest
+        if (x.key) { k = x.key; if (x.caps) setUses(k.use_for); applySupport(); paintAuto(); }     // ticks what it can do, greys out the rest
         paintKeys();
       }
     };
@@ -863,7 +884,7 @@ async function brainView(body) {
         h('div', { class: 'switch' }, h('label', { for: 'kactive', style: 'margin:0;color:var(--text)' }, 'Active'), act1),
         h('label', {}, 'Name / description'), kname,
         h('label', {}, 'Type'), kind, help, baseWrap, acctWrap,
-        h('label', {}, 'Model'), kmodel, models,
+        h('label', {}, 'Model'), autoWrap, kmodel, models,
         keyLabel, kkey,
         h('label', {}, 'Use for'), capsWrap, usesWrap,
         h('p', { class: 'fine' }, 'The assistant picks this key for the jobs ticked here. If it is busy or out of limit, another key takes over.'),
