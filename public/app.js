@@ -887,7 +887,7 @@ function waAgentCard(w) {
   const rHelp = h('p', { class: 'fine', id: 'waareact-help', style: 'margin-top:6px' });
   const rOut = msgEl();
   const RHELP = {
-    natural: 'Like a friend texting: most messages get no reaction. It reacts now and then when it fits: 👍 on a task that takes a while, ✅ when it’s done, ❤️ for thanks, 😂 for a joke, 🙏 for a favour.',
+    natural: 'When you ask it to do something (a task, a search, a reminder, a site…), it puts 👍 on your message as soon as it starts, and changes it to ✅ when it’s done. Small talk usually gets no reaction, just now and then a ❤️ for thanks or 😂 for a joke.',
     every: 'Every message you send gets this emoji when it arrives. The assistant may change it to ❤️, 😂 or ✅ when that fits (✅ = done).',
     off: 'No reactions at all.',
   };
@@ -895,7 +895,7 @@ function waAgentCard(w) {
   const paintReact = () => {
     const m = curMode(), em = w.react_emoji || '👍';
     rSeg.replaceChildren(...RMODES.map(([v, l, sub]) => h('button', { type: 'button', role: 'radio', 'data-mode': v, 'aria-checked': String(m === v),
-      onclick: (e) => { if (curMode() !== v) saveReact(e.currentTarget, { mode: v }, { natural: 'Natural. It reacts only now and then, when it fits.', every: 'Every message. It reacts ' + em + ' to each message.', off: 'Off. No reactions.' }[v]); } },
+      onclick: (e) => { if (curMode() !== v) saveReact(e.currentTarget, { mode: v }, { natural: 'Natural. 👍 when it starts a task, ✅ when it’s done.', every: 'Every message. It reacts ' + em + ' to each message.', off: 'Off. No reactions.' }[v]); } },
       h('span', { class: 'segl' }, l), h('span', { class: 'segs' }, sub || (v === 'every' ? '(' + em + ')' : '\u00a0')))));
     rEmoji.value = em; rEmojiRow.hidden = m !== 'every'; rHelp.textContent = RHELP[m];
   };
@@ -1073,10 +1073,51 @@ async function vaultView(body) {
       h('h3', {}, 'Add a token'), h('label', { for: 'pkind' }, 'Type'), f.kind, h('label', { for: 'pname' }, 'Name'), f.name, h('label', { for: 'ptok' }, 'Token'), f.token, h('label', { for: 'pacct' }, 'Cloudflare account ID'), f.acct, h('label', { for: 'pbase' }, 'API base URL'), f.base,
       h('div', { style: 'margin-top:10px' }, h('button', { class: 'primary', type: 'submit', style: 'width:100%' }, 'Save token')), out));
 }
+// 2.3.7: Sites list with Delete (this server, Cloudflare Pages, GitHub repos it published). Each button asks
+// "Are you sure?" first; his tap is the approval. Errors (like a token without delete permission) show under the list.
+const shortUrl = (u) => String(u || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+function sitesBlock(r) {
+  const out = msgEl(); out.id = 'sites-msg';
+  const wrap = h('div', { id: 'sites' });
+  const doIt = async (btn, s, action, question) => {
+    if (!confirm('Are you sure?\n\n' + question)) return;
+    const x = await act(btn, out, () => api('/api/sites/remove', { platform: s.platform, name: s.name, action, confirm: true }), (y) => y.message || 'Done.');
+    if (x) { const again = await api('/api/projects').catch(() => null); if (again) { wrap.replaceWith(sitesBlock(again)); const m = document.getElementById('sites-msg'); if (m) say(m, x.message || 'Done.', true); } }
+  };
+  const btn = (label, cls, fn) => h('button', { type: 'button', class: 'small ' + cls, onclick: (e) => fn(e.currentTarget) }, label);
+  const row = (s, label, sub, buttons) => h('div', { class: 'item siteitem', 'data-site': s.platform + ':' + s.name },
+    h('div', { class: 'sitetext' }, h('b', {}, label), h('span', { class: 'sub' }, sub)),
+    h('div', { class: 'sitebtns' }, ...buttons));
+  const open = (s) => s.url && s.exists !== false ? h('a', { class: 'small siteopen', href: s.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + s.name }, 'Open ↗') : null;
+  const items = [];
+  for (const s of (r.sites || [])) {
+    const x = { ...s, platform: 'here' };
+    items.push(row(x, s.name, 'This server · ' + shortUrl(s.url), [open(x), btn('Delete', 'danger', (b) => doIt(b, x, 'delete', `Delete the site "${s.name}" from this server? It goes offline right away.`))]));
+  }
+  const cf = r.cloudflare || { items: [] };
+  for (const s of cf.items || []) {
+    const gone = s.exists === false;
+    items.push(row(s, s.name, 'Cloudflare Pages · ' + (gone ? 'not found on Cloudflare anymore' : shortUrl(s.url)) + (s.made_by_me ? '' : ' · not made by me'),
+      gone ? [btn('Remove from list', '', (b) => doIt(b, s, 'forget', `Remove "${s.name}" from this list? Nothing on Cloudflare is touched.`))]
+        : [open(s), btn('Delete', 'danger', (b) => doIt(b, s, 'delete', `Delete the Cloudflare site "${s.name}" (${shortUrl(s.url)}) with all its versions? It goes offline and can't be undone.`))]));
+  }
+  const gh = r.github || { items: [] };
+  for (const s of gh.items || []) {
+    const gone = s.exists === false;
+    items.push(row(s, s.name.split('/')[1] || s.name, 'GitHub · ' + s.name + (gone ? ' · not found on GitHub' : s.pages ? ' · Pages on' : ' · Pages off'),
+      gone ? [btn('Remove from list', '', (b) => doIt(b, s, 'forget', `Remove ${s.name} from this list? Nothing on GitHub is touched.`))]
+        : [s.pages ? open(s) : null, s.pages ? btn('Turn off Pages', '', (b) => doIt(b, s, 'pages_off', `Turn off GitHub Pages for ${s.name}? The site goes offline. The repository and its files stay.`)) : null,
+          btn('Delete repo', 'danger', (b) => doIt(b, s, 'delete_repo', `Delete the GitHub repository ${s.name} with all its files and history? This can't be undone.`))]));
+  }
+  const notes = [cf.note, gh.note].filter(Boolean).map(n => h('p', { class: 'fine' }, n));
+  wrap.append(h('h2', {}, 'Sites'), h('p', { class: 'fine' }, 'Sites I published: on this server, on Cloudflare, and on GitHub. Delete takes one off the internet. It always asks “Are you sure?” first.'),
+    h('div', { class: 'list' }, items.length ? items : h('div', { class: 'item fine' }, 'None yet.')), ...notes, out);
+  return wrap;
+}
 async function projectsView(body) {
   const r = await api('/api/projects');
   body.append(h('p', { class: 'fine' }, 'Ask in chat: “build me a one-page site for …”. I write it in a project folder, build it, and publish it after your OK.'),
-    h('h2', {}, 'Published on this server'), h('div', { class: 'list' }, r.sites.length ? r.sites.map(s => h('a', { class: 'item', href: s.url, target: '_blank', rel: 'noopener' }, s.name, h('span', { class: 'chev' }, '↗'))) : h('div', { class: 'item fine' }, 'None yet.')),
+    sitesBlock(r),
     h('h2', {}, 'Projects'), h('div', { class: 'list' }, r.projects.length ? r.projects.map(p => h('div', { class: 'item' }, p)) : h('div', { class: 'item fine' }, 'None yet.')),
     h('h2', {}, 'Optional extras (one-time setup)'),
     h('p', { class: 'fine' }, 'Each is one command, run once on the server. You only need the ones you want.'),

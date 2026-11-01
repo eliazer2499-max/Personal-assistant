@@ -66,6 +66,11 @@ export async function decide(id, yes, via) {
   run('UPDATE approvals SET status=?, result=? WHERE id=?', status, redact(JSON.stringify(result)).slice(0, 20000), id);
   audit('system', 'approval.' + status, `A${id} ${a.tool}: ${short(result)}`);
   addMessage('notice', 'web', message, { approval: id }, a.job_id);
+  // 2.3.7: Reactions = Natural: the approved step is done, so his WhatsApp message gets ✅ (it had 👍). Never awaited.
+  if (status === 'done' && a.channel === 'whatsapp_agent' && a.job_id) {
+    let wamid = null; try { wamid = JSON.parse(get('SELECT meta FROM jobs WHERE id=?', a.job_id)?.meta || 'null')?.waa_wamid; } catch {}
+    if (wamid) import('./channels/waagent.js').then(w => w.taskDone(wamid)).catch(() => {});
+  }
   if (via === 'web' && a.channel && !['web', 'system'].includes(a.channel)) await deliver(a.channel, message);
   if (setting('continue_after_approval') === '1' && a.job_id && !get('SELECT parent_job FROM jobs WHERE id=?', a.job_id)?.parent_job) {
     const { startJob } = await import('./brain.js');
@@ -82,6 +87,7 @@ function human(tool, args, r) {
     if (tool === 'publish_site') return `published at ${r.url}`;
     if (tool === 'github_publish') return `pushed to ${r.repo}${r.pages ? ' — site: ' + r.pages : ''}`;
     if (tool === 'cloudflare_pages_publish') return `deployed to ${r.url}`;
+    if (tool === 'unpublish_site' && r && r.message) return r.message;   // 2.3.7
     if (tool === 'sms_send') return `text queued to ${args.to}.`;
     if (tool === 'whatsapp_send') return `WhatsApp sent to ${args.to}.`;
     if (tool === 'platform_request') return `${args.method} ${args.path} → HTTP ${r.status}`;

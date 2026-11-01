@@ -77,6 +77,10 @@ WHAT IT DOES
   Makes videos (2.3.6, free): pictures + words (Hebrew/Yiddish too) + music
   into an MP4 under 16 MB (optional, one time:
   sudo bash /opt/myassistant/current/optional/install-video.sh).
+  Removes sites (2.3.7): More → Projects & sites lists the sites it published
+  here, on Cloudflare Pages and on GitHub, each with a Delete button (it asks
+  "Are you sure?" first). GitHub: "Turn off Pages" or "Delete repo", only for
+  repos it published itself. In chat it asks for your YES first.
 - Memory, tasks with reminders, repeating jobs ("every morning check my
   servers"), and a morning summary to your chosen channel.
 - Approvals: one queue (web buttons, Telegram buttons, WhatsApp buttons, or

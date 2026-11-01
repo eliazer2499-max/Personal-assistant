@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { cfg } from '../config.js';
 import { get, redact } from '../db.js';
 import { unseal } from '../crypto.js';
+import * as sites from '../sites.js';
 
 const S = (description, extra = {}) => ({ type: 'string', description, ...extra });
 const N = (description) => ({ type: 'number', description });
@@ -122,12 +123,16 @@ export default [
       copyDir(src, dst);
       return { published: true, url: `${cfg.publicUrl}/sites/${safeName(name)}/` };
     } },
-  { name: 'unpublish_site', description: 'Take down a site published on this server. Waits for the owner\'s YES.',
-    params: { name: S('Site name') }, required: ['name'],
-    approval: (a) => `Delete the public site ${cfg.publicUrl}/sites/${a.name}/`,
-    run: async ({ name }) => { fs.rmSync(path.join(cfg.sitesDir, safeName(name)), { recursive: true, force: true }); return { removed: true }; } },
-  { name: 'sites_list', description: 'List sites published on this server.', params: {},
-    run: async () => { fs.mkdirSync(cfg.sitesDir, { recursive: true }); return { sites: fs.readdirSync(cfg.sitesDir).map(n => ({ name: n, url: `${cfg.publicUrl}/sites/${n}/` })) }; } },
+  // 2.3.7: also Cloudflare Pages projects and the GitHub repos it published (see src/sites.js). Always waits for his YES.
+  { name: 'unpublish_site', description: 'Take down a published site. platform "here" (default): a site on this server. "cloudflare": delete a Cloudflare Pages project. "github": only repos you published with github_publish — action "pages_off" turns off GitHub Pages (repo stays) or "delete_repo" deletes the whole repository. sites_list shows what exists. Waits for the owner\'s YES.',
+    params: { name: S('Site name (here), Cloudflare Pages project name, or GitHub owner/repo'), platform: S('here, cloudflare or github (default here)', { enum: ['here', 'cloudflare', 'github'] }), action: S('GitHub only: pages_off or delete_repo', { enum: ['pages_off', 'delete_repo'] }) }, required: ['name'],
+    approval: (a) => sites.planRemoval(a).summary,
+    run: async (a) => sites.removeSite(a, 'assistant') },
+  { name: 'sites_list', description: 'List published sites: on this server (sites), Cloudflare Pages projects, and the GitHub repos you published (with whether GitHub Pages is on).', params: {},
+    run: async () => {
+      const l = await sites.listSites();
+      return { sites: l.here.map(s => ({ name: s.name, url: s.url })), cloudflare: l.cloudflare, github: l.github };
+    } },
 
   { name: 'github_publish', description: 'Push a project to a GitHub repository with the owner\'s saved GitHub token (creates the repo if needed), optionally turning on GitHub Pages. Waits for the owner\'s YES.',
     params: { project: S('Project name'), repo: S('Repository name, e.g. my-site (under the token\'s account) or owner/name'), folder: S('Folder to push (default the whole project)'), pages: { type: 'boolean', description: 'Turn on GitHub Pages (needs a public repo on free plans)' }, private: { type: 'boolean', description: 'Create as private (default false)' }, message: S('Commit message') },
@@ -135,12 +140,13 @@ export default [
     approval: (a) => `Push project "${a.project}"${a.folder ? ' (folder ' + a.folder + ')' : ''} to GitHub repo ${a.repo}${a.private ? ' (private)' : ' (public)'}${a.pages ? ' and turn on GitHub Pages' : ''}`,
     run: async ({ project, repo, folder, pages, private: priv, message }) => {
       const gh = platformToken('github');
-      const api = (m, p, b) => fetch('https://api.github.com' + p, { method: m, headers: { Authorization: 'Bearer ' + gh.token, Accept: 'application/vnd.github+json', 'User-Agent': 'myassistant', ...(b ? { 'Content-Type': 'application/json' } : {}) }, body: b ? JSON.stringify(b) : undefined });
+      const api = (m, p, b) => fetch(cfg.githubApi + p, { method: m, headers: { Authorization: 'Bearer ' + gh.token, Accept: 'application/vnd.github+json', 'User-Agent': 'myassistant', ...(b ? { 'Content-Type': 'application/json' } : {}) }, body: b ? JSON.stringify(b) : undefined });
       const me = await (await api('GET', '/user')).json();
       if (!me.login) throw new Error('GitHub token was refused');
       const full = repo.includes('/') ? repo : me.login + '/' + repo;
-      let r = await api('GET', '/repos/' + full);
+      let r = await api('GET', '/repos/' + full), madeRepo = false;
       if (r.status === 404) {
+        madeRepo = true;
         r = await api('POST', '/user/repos', { name: full.split('/')[1], private: !!priv, auto_init: false });
         if (!r.ok) throw new Error('Could not create repo: ' + (await r.text()).slice(0, 200));
       }
@@ -157,6 +163,7 @@ export default [
         const pj = await p.json().catch(() => ({}));
         pagesUrl = pj.html_url || `https://${full.split('/')[0]}.github.io/${full.split('/')[1]}/`;
       }
+      sites.record('github', full, pagesUrl || 'https://github.com/' + full, { pages: !!pagesUrl, madeRepo });   // 2.3.7: for the Sites list
       return { pushed: true, repo: 'https://github.com/' + full, pages: pagesUrl };
     } },
   { name: 'cloudflare_pages_publish', description: 'Deploy a built folder to Cloudflare Pages with the owner\'s saved Cloudflare token (uses wrangler via npx). Waits for the owner\'s YES.',
@@ -171,6 +178,7 @@ export default [
       await runInSandbox(dir, `npx --yes wrangler@3 pages project create ${n} --production-branch=main 2>&1 || true`, { timeoutS: 600, env });
       const res = await runInSandbox(dir, `npx --yes wrangler@3 pages deploy ${JSON.stringify(folder)} --project-name=${n} --branch=main 2>&1`, { timeoutS: 900, env });
       if (res.exit_code !== 0) throw new Error('Cloudflare deploy failed: ' + res.output.slice(-600));
+      sites.record('cloudflare', n, `https://${n}.pages.dev/`);   // 2.3.7: for the Sites list
       return { deployed: true, url: `https://${n}.pages.dev/`, output: res.output.slice(-800) };
     } },
 

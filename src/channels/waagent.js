@@ -199,8 +199,10 @@ async function postMessage(payload, { needId = true } = {}) {
 export const REACT_CHOICES = ['👍', '👀', '❤️', '✅'];
 const WAMID_RE = /^[A-Za-z0-9._:=+\/-]{1,256}$/;
 // 2.3.4: Settings → Channels → WhatsApp Agent → Reactions is one of three modes:
-//   natural — no automatic reaction; the assistant reacts now and then with the react tool, like a friend texting (default;
-//             2.3.3 installs move here too, whatever "React to my messages" was set to);
+//   natural — no automatic reaction on chit-chat; the assistant reacts now and then with the react tool, like a friend
+//             texting (default; 2.3.3 installs move here too, whatever "React to my messages" was set to).
+//             2.3.7: a real request (the job used at least one tool other than react) gets 👍 when the work starts and
+//             ✅ when it finishes well — see taskStarted / taskDone;
 //   every   — the 2.3.3 behaviour: every accepted message gets the chosen emoji (👍 👀 ❤️ ✅);
 //   off     — no reactions at all, the react tool included.
 export const REACT_MODES = ['natural', 'every', 'off'];
@@ -259,7 +261,10 @@ const RECENT_MAX = 12;
 function recentIn() { try { const a = JSON.parse(setting('wa_agent_react_recent') || '[]'); return Array.isArray(a) ? a.filter(x => x && typeof x.id === 'string') : []; } catch { return []; } }
 function saveRecent(a) { setSetting('wa_agent_react_recent', JSON.stringify(a.slice(-RECENT_MAX))); }
 export function noteInbound(wamid) { const a = recentIn().filter(x => x.id !== wamid); a.push({ id: wamid, r: false }); saveRecent(a); }
-function markReacted(wamid, on) { const a = recentIn(); const x = a.find(y => y.id === wamid); if (x) { x.r = !!on; saveRecent(a); } }
+// 2.3.7: x.e = the emoji now on the message; x.auto = it was the automatic task reaction (👍/✅), which does not
+// count toward the Natural cap (the cap is about the assistant's own chit-chat reactions).
+function markReacted(wamid, on, e = '', auto = false) { const a = recentIn(); const x = a.find(y => y.id === wamid); if (x) { x.r = !!on; x.e = on ? e : ''; x.auto = !!(on && auto); saveRecent(a); } }
+const onNow = (wamid) => recentIn().find(y => y.id === wamid)?.e || '';
 /** True when the assistant already reacted to his 2 messages right before this one (so a 3rd in a row is skipped). */
 export function reactedTwiceBefore(wamid) {
   const a = recentIn();
@@ -267,7 +272,7 @@ export function reactedTwiceBefore(wamid) {
   if (i < 0) i = a.length;
   if (a[i] && a[i].r) return false;                     // changing a reaction already on this message (👍 → ✅) is fine
   const prev = a.slice(Math.max(0, i - 2), i);
-  return prev.length === 2 && prev.every(x => x.r);
+  return prev.length === 2 && prev.every(x => x.r && !x.auto);
 }
 /**
  * The assistant's react tool. Off → refused. Natural → at most 2 of his messages in a row (a 3rd is skipped and the
@@ -283,9 +288,42 @@ export async function toolReact(wamid, emoji) {
     return { skipped: true, emoji: e };
   }
   const sent = await reactTo(id, e);
-  markReacted(id, !!sent);
+  markReacted(id, !!sent, sent);
   return { skipped: false, emoji: sent };
 }
+
+// ---------------------------------------------------------------- 2.3.7: Natural-mode task reactions
+// "Real request" = the job for his message used at least one tool other than react (a question it answers from its
+// head, a "thanks" or an "ok" uses none). The brain calls taskStarted at that first tool call (👍, "I'm on it") and
+// taskDone when the job ended well (✅). Natural mode only; Every message and Off are untouched. Same 12-a-minute
+// budget as everything else and never awaited by the brain, so a reaction can never hold up a reply.
+export const TASK_START = '👍', TASK_DONE = '✅';
+const taskChain = new Map();   // per message: ✅ waits for a 👍 still on its way, so the right one ends up on
+function autoTask(wamid, e, what) {
+  const id = String(wamid || '').trim();
+  const p = (taskChain.get(id) || Promise.resolve('')).then(() => autoTaskNow(id, e, what));
+  taskChain.set(id, p);
+  p.finally(() => { if (taskChain.get(id) === p) taskChain.delete(id); });
+  return p;
+}
+async function autoTaskNow(id, e, what) {
+  if (reactMode() !== 'natural' || !WAMID_RE.test(id)) return '';
+  if (onNow(id) === e) return e;                                    // already showing (e.g. the AI put ✅ itself)
+  try {
+    const sent = await reactTo(id, e);
+    markReacted(id, true, sent, true);
+    audit('assistant', 'wa_agent.react_task', `${what}: ${sent}`);
+    return sent;
+  } catch (err) {
+    log('wa agent react', err.message);
+    audit('system', 'wa_agent.react_failed', `automatic ${e} (${what}): ${err.message}`);
+    return '';
+  }
+}
+/** The job for his message started real work (its first tool other than react): 👍 on his message. */
+export const taskStarted = (wamid) => autoTask(wamid, TASK_START, 'task started');
+/** That job finished well: ✅ replaces the 👍. */
+export const taskDone = (wamid) => autoTask(wamid, TASK_DONE, 'task done');
 /**
  * 2.3.5 safety net for the outbound text. The AI sometimes types its reaction ("✅", blank line, then the words)
  * instead of calling the react tool. A first or last line holding only 1–2 status emoji (✅ ☑️ ✔️ 👍 👌 ❤️ 🙏 😂 👀
@@ -296,11 +334,23 @@ export async function toolReact(wamid, emoji) {
  * reaction fails. Emoji inside a sentence are never touched. Activity gets one line; the chat never does.
  * Returns { text: string to send | null when nothing is left to send, reacted: emoji | '' }.
  */
-export async function moveStatusEmoji(text, wamid) {
+export async function moveStatusEmoji(text, wamid, opts = {}) {
   const s = splitStatusEmoji(text);
   if (!s.where) return { text, reacted: '' };
   const e = s.emoji, id = String(wamid || '').trim();
   const mode = reactMode();
+  // 2.3.7: the job finished a real request in Natural mode, so ✅ goes on his message anyway (sendOwner). The typed
+  // line is just taken out (two reactions racing would leave the wrong one on); an emoji-only reply becomes that ✅.
+  if (opts.taskDone && mode === 'natural' && WAMID_RE.test(id)) {
+    if (s.where === 'only') {
+      const r = await taskDone(id);
+      if (r) { audit('assistant', 'wa_agent.react_moved', `the reply was only ${e}; the task ✅ went on his message instead`); return { text: null, reacted: r }; }
+      audit('system', 'wa_agent.react_moved', `the reply was only ${e}; sent it as text (the ✅ reaction was not sent)`);
+      return { text, reacted: '' };
+    }
+    audit('system', 'wa_agent.react_moved', `removed ${e} from the text; the task ✅ goes on his message instead`);
+    return { text: s.text, reacted: '' };
+  }
   const can = mode !== 'off' && WAMID_RE.test(id);
   let reacted = '', why = '';
   if (can) {
@@ -489,10 +539,12 @@ export async function sendOwner(text, opts = {}) {
   const to = setting('wa_agent_creator');
   if (!to) throw new Error('Send your WhatsApp agent one message first, so I know your chat');
   // 2.3.5: a lone "✅" line typed into the reply becomes a real reaction on his message (or is just dropped).
-  const net = await moveStatusEmoji(text, opts.meta?.waa_wamid);
+  const net = await moveStatusEmoji(text, opts.meta?.waa_wamid, { taskDone: !!opts.taskDone });
   if (net.reacted && net.text === null) return true;           // the whole reply was an emoji: it went as a reaction
   text = net.text ?? text;
   const jobs = splitText(toWhatsApp(text)).map(c => enqueue({ type: 'text', to, text: c }));
+  // 2.3.7: Natural mode, a real request that finished well → ✅ on his message, queued right after the words (not awaited).
+  if (opts.taskDone) Promise.resolve(jobs[0]).catch(() => {}).finally(() => taskDone(opts.meta?.waa_wamid));
   for (const f of opts.files || []) {
     try { jobs.push(enqueue({ type: 'file', to, buf: fs.readFileSync(files.filePath(f)), mime: f.mime, name: f.name })); } catch (e) { log('wa agent: file not sent', e.message); }
   }

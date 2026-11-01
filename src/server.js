@@ -24,6 +24,7 @@ import * as updates from './updates.js';
 import { normalizeSource, label as srcLabel } from './release-source.js';
 import * as chats from './chats.js';
 import * as files from './files.js';
+import * as sitesMod from './sites.js';
 
 const PUB = path.join(APP_DIR, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.json': 'application/json', '.ico': 'image/x-icon' };
@@ -287,6 +288,12 @@ R('POST', /^\/api\/schedules\/(\d+)\/cancel$/, (c) => { run('UPDATE schedules SE
 R('GET', /^\/api\/projects$/, async () => {
   const p = await tools.byName('project_list').run({}); const s = await tools.byName('sites_list').run({});
   return { ...p, ...s, workspace: cfg.workspace };
+});
+// 2.3.7: Sites list → Delete. His tap (after "Are you sure?" on the page) is the approval; confirm:true must be sent.
+R('POST', /^\/api\/sites\/remove$/, async (c) => {
+  if (c.body.confirm !== true) throw auth.httpErr(400, 'Not confirmed. Nothing was deleted.');
+  try { return await sitesMod.removeSite({ platform: c.body.platform, name: c.body.name, action: c.body.action }, 'owner'); }
+  catch (e) { audit('owner', 'site.remove_failed', `${String(c.body.platform || '')} ${String(c.body.name || '')}: ${e.message}`.slice(0, 300)); throw auth.httpErr(e.kind === 'permission' ? 403 : 400, e.message); }
 });
 
 // updates, backups, security

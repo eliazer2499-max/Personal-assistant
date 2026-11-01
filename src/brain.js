@@ -453,7 +453,7 @@ export async function testKey(id) {
 // 2.3.4: reaction guidance follows Settings → Channels → WhatsApp Agent → Reactions.
 // 2.3.5: both modes also say: no lone ✅ line in the text — the react tool is how a reaction is made.
 export const NO_LONE_EMOJI = 'Never start or end a reply with a lone status emoji such as ✅ 👍 ❤️. To react, call the react tool; it puts the emoji on his message. Emoji inside normal sentences are fine.';
-export const REACT_GUIDE_NATURAL = 'On WhatsApp you can put an emoji reaction on his message with the react tool. React the way a friend texting does: most messages get no reaction at all. Good fits: 👍 when he gives you a task that will take a while (so he knows you picked it up), ❤️ for thanks or good news, 😂 for something funny, ✅ when a task he asked for is done, 🙏 for an apology or a favour. Never react to every message, don\'t react twice in a row unless it really fits, and never react instead of answering a question. As a rough guide, react to at most about 1 in 3 of his messages. ' + NO_LONE_EMOJI;
+export const REACT_GUIDE_NATURAL = 'On WhatsApp you can put an emoji reaction on his message with the react tool. When you use tools for a request of his, his message gets 👍 automatically when you start and ✅ when you finish, so you don\'t need to react to those yourself. React the way a friend texting does: most messages get no reaction at all. Good fits: 👍 when he gives you a task that will take a while (so he knows you picked it up), ❤️ for thanks or good news, 😂 for something funny, ✅ when a task he asked for is done, 🙏 for an apology or a favour. Never react to every message, don\'t react twice in a row unless it really fits, and never react instead of answering a question. As a rough guide, react to at most about 1 in 3 of his messages. ' + NO_LONE_EMOJI;
 export const REACT_GUIDE_EVERY = 'On WhatsApp his messages already get an automatic reaction. You can change it with the react tool (❤️ thanks/good news, 😂 a joke, ✅ a job he asked for is done). Use it sparingly, and a reaction never replaces an answer he needs. ' + NO_LONE_EMOJI;
 function reactGuidance() {
   const m = setting('wa_agent_react_mode');
@@ -606,6 +606,10 @@ async function runJob({ id, text, channel, meta, before, chatId, fileRows, paren
   let lastRoute = '';
   const ctx = { jobId: id, channel, meta, actor: 'assistant', chatId: chatId || job.chat_id, isHelper, deadline };
   let final = '', steps = 0;
+  // 2.3.7: Natural reactions. A "real request" = this job used at least one tool other than react (chit-chat, a bare
+  // thanks/ok or a question answered from memory use none). First such tool → 👍 on his message; finished well → ✅.
+  const waId = !isHelper && channel === 'whatsapp_agent' ? meta?.waa_wamid : null;
+  let realWork = false, unfinished = false;   // unfinished: waits for his YES, or hit the step/time limit
   try {
     const tools = declarations({ helper: isHelper });
     const system = systemPrompt(channel);
@@ -628,15 +632,17 @@ async function runJob({ id, text, channel, meta, before, chatId, fileRows, paren
       }
       steps++;
       run('UPDATE jobs SET steps=? WHERE id=?', steps, id);
-      if (!resp.calls?.length || outOfRoom) { final = resp.text || (outOfRoom ? 'I hit the step limit for one job.' : '(no answer)'); break; }
+      if (!resp.calls?.length || outOfRoom) { final = resp.text || (outOfRoom ? 'I hit the step limit for one job.' : '(no answer)'); if (outOfRoom) unfinished = true; break; }
       items.push({ role: 'assistant', text: resp.text, calls: resp.calls, raw: resp.raw });
       if (resp.text) event(id, 'note', resp.text);
       for (const c of resp.calls) {
+        if (waId && !realWork && c.name !== 'react') { realWork = true; import('./channels/waagent.js').then(w => w.taskStarted(waId)).catch(() => {}); }
         event(id, 'tool', `${c.name} ${JSON.stringify(summarizeArgs(c.args)).slice(0, 300)}`);
         let result = await execTool(c.name, c.args, ctx);
         const see = result && Array.isArray(result._see) && result._see.length ? result._see : null;   // 2.3.6: a picture for the model to look at
         let s = JSON.stringify(result ?? null);
         if (s.length > 24000) { result = { truncated_json: s.slice(0, 24000) + '…' }; s = '(large result)'; }
+        if (result && result.status === 'waiting_for_owner_approval') unfinished = true;
         event(id, result && result.error ? 'error' : (result && result.status === 'waiting_for_owner_approval' ? 'approval' : 'result'), s.slice(0, 400));
         items.push(see ? { role: 'tool', id: c.id, name: c.name, result, media: see } : { role: 'tool', id: c.id, name: c.name, result });
         if (see) keepRecentToolPictures(items);
@@ -656,7 +662,10 @@ async function runJob({ id, text, channel, meta, before, chatId, fileRows, paren
   // 2.2: pictures the assistant made in this job go to WhatsApp Agent too (as photos/files after the text).
   // (files that send_file already delivered to WhatsApp are not sent twice)
   const made = channel === 'whatsapp_agent' ? all("SELECT f.* FROM files f JOIN messages m ON m.id=f.message_id WHERE m.job_id=? AND m.role='assistant' AND (m.meta IS NULL OR m.meta NOT LIKE '%\"sent_file\"%')", id) : [];
-  if (channel !== 'web' && channel !== 'system') await deliver(channel, final, { meta, files: made });
+  // 2.3.7: ✅ only when the job really finished (not stopped, failed, or still waiting for his YES — then the 👍 stays
+  // until the approved step is done, see approvals.decide).
+  const taskDone = !!(waId && realWork && !unfinished && get('SELECT status FROM jobs WHERE id=?', id)?.status === 'done');
+  if (channel !== 'web' && channel !== 'system') await deliver(channel, final, { meta, files: made, taskDone });
   return final;
 }
 
