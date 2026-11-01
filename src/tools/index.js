@@ -6,6 +6,8 @@ import ssh from './ssh.js';
 import agents from './agents.js';
 import sendfile from './sendfile.js';
 import reacts from './react.js';
+import sitecheck from './sitecheck.js';
+import video from './video.js';
 import { platformToken } from './workspace.js';
 import { setting, setSetting, audit, all, redact } from '../db.js';
 import { request } from '../approvals.js';
@@ -49,7 +51,7 @@ const messaging = [
     run: async () => (await import('../updates.js')).checkUpdate(true) },
 ];
 
-export const ALL = [...basic, ...google, ...workspace, ...ssh, ...platform, ...messaging, ...agents, ...sendfile, ...reacts];
+export const ALL = [...basic, ...google, ...workspace, ...ssh, ...platform, ...messaging, ...agents, ...sendfile, ...reacts, ...sitecheck, ...video];
 const MAP = new Map(ALL.map(t => [t.name, t]));
 export function byName(n) { return MAP.get(n); }
 

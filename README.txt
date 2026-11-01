@@ -71,6 +71,12 @@ WHAT IT DOES
   to GitHub (and GitHub Pages) or to Cloudflare Pages with your tokens.
   Android apps: it prepares a WebView app; GitHub builds the APK for free,
   or install the optional Android SDK on an x86 server.
+  Checks its sites (2.3.6): opens them in a hidden browser at phone size,
+  looks at the picture and fixes what looks wrong (optional, one time:
+  sudo bash /opt/myassistant/current/optional/install-browser.sh).
+  Makes videos (2.3.6, free): pictures + words (Hebrew/Yiddish too) + music
+  into an MP4 under 16 MB (optional, one time:
+  sudo bash /opt/myassistant/current/optional/install-video.sh).
 - Memory, tasks with reminders, repeating jobs ("every morning check my
   servers"), and a morning summary to your chosen channel.
 - Approvals: one queue (web buttons, Telegram buttons, WhatsApp buttons, or

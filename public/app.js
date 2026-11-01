@@ -1078,7 +1078,11 @@ async function projectsView(body) {
   body.append(h('p', { class: 'fine' }, 'Ask in chat: “build me a one-page site for …”. I write it in a project folder, build it, and publish it after your OK.'),
     h('h2', {}, 'Published on this server'), h('div', { class: 'list' }, r.sites.length ? r.sites.map(s => h('a', { class: 'item', href: s.url, target: '_blank', rel: 'noopener' }, s.name, h('span', { class: 'chev' }, '↗'))) : h('div', { class: 'item fine' }, 'None yet.')),
     h('h2', {}, 'Projects'), h('div', { class: 'list' }, r.projects.length ? r.projects.map(p => h('div', { class: 'item' }, p)) : h('div', { class: 'item fine' }, 'None yet.')),
-    h('p', { class: 'fine' }, 'Android apps: optional. On the server run sudo bash /opt/myassistant/current/optional/install-android-sdk.sh (about 3 GB), then ask me to build an APK.'));
+    h('h2', {}, 'Optional extras (one-time setup)'),
+    h('p', { class: 'fine' }, 'Each is one command, run once on the server. You only need the ones you want.'),
+    h('p', { class: 'fine' }, 'Android apps: optional. On the server run sudo bash /opt/myassistant/current/optional/install-android-sdk.sh (about 3 GB), then ask me to build an APK.'),
+    h('p', { class: 'fine' }, 'Check sites with a phone-size picture: sudo bash /opt/myassistant/current/optional/install-browser.sh (about 500 MB). Then I can look at the sites I build and fix what looks wrong.'),
+    h('p', { class: 'fine' }, 'Make videos (free): sudo bash /opt/myassistant/current/optional/install-video.sh (about 300 MB). Then ask me for a video from your photos, with words and music.'));
 }
 async function auditView(body) {
   const list = h('div', { class: 'list audit' }); body.append(list);
