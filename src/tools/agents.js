@@ -73,7 +73,7 @@ const imageGenerate = {
     let keyList = aikeys.geminiKeys().filter(k => k.key);
     if (!keyList.length && secret('gemini_api_key')) keyList = [{ id: 0, name: 'Gemini', key: secret('gemini_api_key') }];
     const others = aikeys.otherPictureKeys();          // 2.3.10: other keys whose model can make pictures (ticked "Pictures")
-    if (!keyList.length && !others.length) return { error: 'Picture creation needs a Gemini key, or another key whose model can make pictures with "Pictures" ticked (Settings → Brain → AI keys → tap Test on the key).' };
+    if (!keyList.length && !others.length) return { error: 'Picture creation needs a Gemini key, or another key whose model can make pictures with "Pictures" ticked (Settings → Brain → AI keys → tap Test on the key). A free Cloudflare (pictures) key works too.' };
     const files = await import('../files.js');
     const { addMessage } = await import('../notify.js');
     let lastImg = null;
@@ -89,7 +89,7 @@ const imageGenerate = {
       const mime = mimeIn === 'image/jpeg' ? 'image/jpeg' : mimeIn === 'image/webp' ? 'image/webp' : 'image/png';
       const msgId = addMessage('assistant', 'web', '🎨 ' + String(prompt).slice(0, 300), { generated: 'image' }, ctx.jobId || null, ctx.chatId || null);
       const file = files.saveGenerated(buf, mime, 'picture-' + Date.now() + (mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : '.jpg'), ctx.chatId, msgId);
-      return { ok: true, shown_to_owner_in_chat: true, file_id: file.id, download: cfg.publicUrl + '/api/files/' + file.id + '?download=1', model, model_note: String(words || '').slice(0, 300) || undefined,
+      return { ok: true, shown_to_owner_in_chat: true, file_id: file.id, download: cfg.publicUrl + '/api/files/' + file.id + '?download=1', model, made_with: usedKey?.name, model_note: String(words || '').slice(0, 300) || undefined,
         note: 'The picture is already in the chat. Do not paste the link unless the owner asks; just say it is ready.' };
     };
     let geminiError = '';
@@ -139,6 +139,24 @@ const imageGenerate = {
     const { generateOpenAI } = await import('../pictures.js');
     const errs = [];
     for (const k of others) {
+      if (k.kind === 'cloudflare') {        // 2.3.11: his own Cloudflare account (Workers AI, free daily amount)
+        const { cfGenerate } = await import('../cloudflare.js');
+        const g = await cfGenerate({ accountId: k.base_url, token: k.key, model: k.model, prompt: String(prompt).slice(0, 2048) });
+        if (g.ok) {
+          const why = (geminiError ? ' (Gemini could not: ' + geminiError.slice(0, 120) + ')' : '') + (errs.length ? ' (before it: ' + errs.join('; ').slice(0, 160) + ')' : '');
+          const out = finish(k, g.model, g.mime, g.buf, '', why);
+          out.made_with = `${k.name} (Cloudflare, ${g.model})`;
+          out.note += ` Made with his Cloudflare key "${k.name}"` + (geminiError ? ' because Gemini could not make it (' + geminiError.slice(0, 100) + ')' : '') + '. Tell him which one made it in a few words.' + (lastImg ? ' Cloudflare makes new pictures only, so his photo was not used.' : '');
+          return out;
+        }
+        errs.push(`"${k.name}" (Cloudflare): ${g.message}`);
+        log('picture: key', k.name, 'failed:', String(g.message).slice(0, 200));
+        if (k.id && (g.limit || g.keyProblem)) {
+          const d = new Date(); const nextUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+          aikeys.markFail(k.id, { reason: String(g.message).slice(0, 280), until: g.limit && /free pictures for today/.test(g.message) ? nextUtc : g.limit ? Date.now() + 60000 : 0, problem: g.keyProblem ? 'Cloudflare refused this key — tap Test' : null });
+        }
+        continue;
+      }
       try {
         const g = await generateOpenAI(k, k.key, { prompt: String(prompt).slice(0, 4000), image: lastImg, timeoutMs: cfg.testMode ? 15000 : 180000 });
         return finish(k, k.model, g.mime, g.buf, g.words, geminiError ? ' (Gemini could not: ' + geminiError.slice(0, 120) + ')' : '');

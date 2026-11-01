@@ -28,6 +28,7 @@ export const cfg = {
   mockModule: env.MA_MOCK_MODULE || '',
   googleBase: env.MA_GOOGLE_BASE || '',     // test override for all Google endpoints
   geminiBase: env.MA_GEMINI_BASE || '',   // test override
+  cloudflareBase: env.MA_CLOUDFLARE_BASE || '',   // 2.3.11 test override (Cloudflare API base, ends in /client/v4)
   githubApi: (env.MA_GITHUB_API || 'https://api.github.com').replace(/\/+$/, ''),                      // 2.3.7: test override
   cloudflareApi: (env.MA_CLOUDFLARE_API || 'https://api.cloudflare.com/client/v4').replace(/\/+$/, ''),  // 2.3.7: test override
   telegramBase: env.MA_TELEGRAM_BASE || 'https://api.telegram.org',

@@ -1,0 +1,89 @@
+// 2.3.11: a fake Cloudflare API (Workers AI + token verify) on 127.0.0.1 for the tests and the local real check.
+// Shapes follow Cloudflare's docs (Nov 2026): every JSON answer is {success, errors:[{code,message}], messages, result}.
+import http from 'node:http';
+import zlib from 'node:zlib';
+
+export const ACCT = '0123456789abcdef0123456789abcdef';
+export const OTHER_ACCT = 'fedcba9876543210fedcba9876543210';
+// Tokens that match none of the app's redaction patterns, so only the app's own wiping hides them.
+export const TOK = {
+  good: 'cfGood' + 'g'.repeat(34),        // Workers AI Read+Edit on ACCT
+  noperm: 'cfNoPerm' + 'n'.repeat(32),    // valid, ACCT listed, but no Workers AI permission
+  other: 'cfOther' + 'o'.repeat(33),      // valid, but for OTHER_ACCT
+  bad: 'cfBad' + 'b'.repeat(35),          // not a token Cloudflare knows
+  acct: 'cfAcctOwned' + 'a'.repeat(29),   // account-owned token: only the account verify address knows it
+  quota: 'cfQuota' + 'q'.repeat(33),      // works, but today's free Neurons are used up
+  echo: 'cfEcho' + 'e'.repeat(34),        // refused, and the error repeats the token
+};
+
+/** A real, valid PNG of w×h in one colour (so the saved file can be opened and checked). */
+export function png(w = 8, h = 8, rgb = [200, 60, 40]) {
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const len = Buffer.alloc(4); len.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const row = Buffer.concat([Buffer.from([0]), Buffer.from(Array.from({ length: w }, () => rgb).flat())]);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(Buffer.concat(Array(h).fill(row)))), chunk('IEND', Buffer.alloc(0))]);
+}
+
+export const MODELS = ['@cf/black-forest-labs/flux-1-schnell', '@cf/bytedance/stable-diffusion-xl-lightning', '@cf/black-forest-labs/flux-2-klein-4b', '@cf/leonardo/phoenix-1.0'];
+
+export async function startMockCloudflare() {
+  const SEEN = [];      // { path, token, body }
+  const srv = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks).toString('latin1');
+    const token = String(req.headers.authorization || '').replace(/^Bearer /, '');
+    const u = new URL(req.url, 'http://x'); const p = u.pathname.replace(/^\/client\/v4/, '');
+    SEEN.push({ path: p, query: u.search, token, method: req.method, ctype: String(req.headers['content-type'] || ''), body: body.slice(0, 400) });
+    const J = (o, s = 200) => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: s < 400, errors: [], messages: [], result: null, ...o })); };
+    const authErr = () => J({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }, 403);
+    const invalid = () => J({ success: false, errors: [{ code: 1000, message: 'Invalid API Token' }] }, 401);
+    const known = Object.values(TOK).includes(token) && token !== TOK.bad;
+    if (token === TOK.echo) return J({ success: false, errors: [{ code: 1000, message: 'Invalid API Token ' + TOK.echo }] }, 401);
+    if (p === '/user/tokens/verify') {
+      if (!known || token === TOK.acct) return invalid();
+      return J({ result: { id: 'tok1', status: 'active' }, messages: [{ code: 10000, message: 'This API Token is valid and active', type: null }] });
+    }
+    let m = /^\/accounts\/([^/]+)\/tokens\/verify$/.exec(p);
+    if (m) { if (token === TOK.acct && m[1] === ACCT) return J({ result: { id: 'tok2', status: 'active' } }); return invalid(); }
+    if (p === '/accounts') {
+      if (!known) return invalid();
+      const acc = token === TOK.other ? [{ id: OTHER_ACCT, name: 'Someone else\'s account' }] : [{ id: ACCT, name: "Abish's account" }];
+      return J({ result: acc });
+    }
+    m = /^\/accounts\/([^/]+)\/(.*)$/.exec(p);
+    if (!m) return J({ success: false, errors: [{ code: 7000, message: 'No route for that URI' }] }, 400);
+    const [, acct, rest] = m;
+    if (!/^[0-9a-f]{32}$/.test(acct)) return J({ success: false, errors: [{ code: 7003, message: 'Could not route to /accounts/' + acct + ', perhaps your object identifier is invalid?' }] }, 400);
+    if (!known) return invalid();
+    const okAcct = token === TOK.other ? acct === OTHER_ACCT : acct === ACCT;
+    if (!okAcct || token === TOK.noperm) return authErr();
+    if (rest === 'ai/models/search') {
+      const task = u.searchParams.get('task');
+      const all = [...MODELS.map(n => ({ name: n, task: { name: 'Text-to-Image' } })), { name: '@cf/meta/llama-3.1-8b-instruct', task: { name: 'Text Generation' } }];
+      return J({ result: all.filter(x => !task || x.task.name === task) });
+    }
+    const run = /^ai\/run\/(.+)$/.exec(rest);
+    if (run && req.method === 'POST') {
+      const model = run[1];
+      if (token === TOK.quota) return J({ success: false, errors: [{ code: 3036, message: "AiError: You have used up your daily free allocation of 10,000 neurons. Please upgrade to Cloudflare's Workers Paid plan if you would like to continue usage." }] }, 429);
+      if (!MODELS.includes(model)) return J({ success: false, errors: [{ code: 5007, message: 'No such model ' + model + ' or task' }] }, 400);
+      const multipart = String(req.headers['content-type'] || '').startsWith('multipart/form-data');
+      if (model.includes('/flux-2-')) {
+        if (!multipart) return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: request must be multipart/form-data' }] }, 400);
+        if (!/name="prompt"/.test(body)) return J({ success: false, errors: [{ code: 5006, message: 'prompt is required' }] }, 400);
+        return J({ result: { image: png(16, 16, [40, 160, 60]).toString('base64') } });
+      }
+      let j = {}; try { j = JSON.parse(body); } catch {}
+      if (!j.prompt) return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: must have required property prompt' }] }, 400);
+      if (model.includes('flux-1-schnell')) return J({ result: { image: png(16, 16, [200, 60, 40]).toString('base64') } });
+      // stable-diffusion / phoenix: raw bytes
+      res.writeHead(200, { 'Content-Type': 'image/png' }); return res.end(png(16, 16, [40, 60, 200]));
+    }
+    J({ success: false, errors: [{ code: 7000, message: 'No route for that URI' }] }, 404);
+  });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const url = 'http://127.0.0.1:' + srv.address().port + '/client/v4';
+  return { url, SEEN, close: () => new Promise(r => srv.close(r)) };
+}

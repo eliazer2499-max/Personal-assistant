@@ -667,7 +667,8 @@ function whoDoesWhat(keys) {
     const can = (k) => (k.use_support?.[u]?.ok ?? null) !== false;          // 2.3.2: Test showed it can't → not picked
     const hears = (k) => k.use_support?.media?.ok === true || (k.kind === 'gemini' && can(k));
     // 2.3.10: pictures = Gemini keys, or another key he ticked "Pictures" on whose Test said its model can
-    const pool = (u === 'pictures' ? keys.filter(k => k.kind === 'gemini' || (k.use_for.includes('pictures') && k.use_support?.pictures?.ok === true)) : keys).filter(can);
+    // 2.3.11: a Cloudflare (pictures) key ticked Pictures counts unless its last Test failed
+    const pool = (u === 'pictures' ? keys.filter(k => k.kind === 'gemini' || (k.use_for.includes('pictures') && (k.use_support?.pictures?.ok === true || (k.kind === 'cloudflare' && k.use_support?.pictures?.ok !== false)))) : keys).filter(can);
     const tagged = (u === 'media' ? pool.find(k => free(k) && k.use_for.includes(u) && hears(k)) : null) || pool.find(k => free(k) && k.use_for.includes(u));
     const any = tagged || (u === 'media' ? pool.find(k => free(k) && hears(k)) : null) || pool.find(k => free(k));
     return [u, any, !!tagged];
@@ -720,7 +721,7 @@ async function brainView(body) {
       h('span', { class: 'knum' }, String(i + 1)),
       h('span', { class: 'kbody' },
         h('span', { class: 'kname' }, h('b', {}, k.name)),
-        h('span', { class: 'ksub' }, (k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible') + ' · ', h('span', { class: 'mono' }, k.effective_model || 'no model')),
+        h('span', { class: 'ksub' }, (k.kind_label || (k.kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible')) + ' · ', h('span', { class: 'mono' }, k.effective_model || 'no model')),
         h('span', { class: 'ktags' }, h('span', { class: 'pill ' + cls, 'data-status': k.id }, st),
           k.use_for.length ? k.use_for.map(u => h('span', { class: 'tag', 'data-tag': u }, USE_SHORT[u])) : h('span', { class: 'tag none' }, 'Not used for anything')),
         problem ? h('span', { class: 'fine kline' }, problem) : null),
@@ -737,11 +738,16 @@ async function brainView(body) {
     back.append(sheet); document.body.append(back); document.body.classList.add('noscroll');
     const o = msgEl(), to = msgEl();
     const kname = h('input', { 'data-f': 'name', value: k ? k.name : '', placeholder: 'e.g. Gemini – project 2 (abish@…)' });
-    const kind = h('select', { 'data-f': 'kind' }, h('option', { value: 'gemini' }, 'Gemini (Google)'), h('option', { value: 'groq' }, 'Groq (free, OpenAI-compatible)'), h('option', { value: 'openai' }, 'Other OpenAI-compatible'));
+    const kind = h('select', { 'data-f': 'kind' }, h('option', { value: 'gemini' }, 'Gemini (Google)'), h('option', { value: 'groq' }, 'Groq (free, OpenAI-compatible)'), h('option', { value: 'openai' }, 'Other OpenAI-compatible'), h('option', { value: 'cloudflare' }, 'Cloudflare (pictures)'));
     kind.value = k ? (k.kind === 'openai' && k.base_url === K.groq.base_url ? 'groq' : k.kind) : 'gemini';
     const base = h('input', { 'data-f': 'base', value: k ? k.base_url : '', placeholder: 'https://…/v1', autocapitalize: 'off', spellcheck: 'false' });
     const kmodel = h('input', { 'data-f': 'model', value: k ? k.model : '', autocapitalize: 'off', spellcheck: 'false' });
     const kkey = h('input', { 'data-f': 'key', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: k && k.has_key ? 'saved — paste to replace' : 'paste the key' });
+    // 2.3.11: Cloudflare (pictures): Account ID (not secret) + API token (in the Key field)
+    const acct = h('input', { 'data-f': 'account', value: k && k.kind === 'cloudflare' ? (k.account_id || '') : '', placeholder: '32 letters and numbers', autocapitalize: 'off', spellcheck: 'false', autocomplete: 'off' });
+    const acctWrap = h('div', { 'data-acct': '1' }, h('label', {}, 'Account ID'), acct);
+    const keyLabel = h('label', {}, 'Key');
+    const CF_MODEL = '@cf/black-forest-labs/flux-1-schnell';
     const act1 = h('input', { type: 'checkbox', 'data-f': 'active', 'data-active': k ? k.id : 'new', id: 'kactive' }); act1.checked = k ? k.active : true;
     if (k) act1.onchange = async () => { try { const x = await api(`/api/brain/keys/${k.id}`, { active: act1.checked }); k = x.key; paintKeys({ ...K, keys: x.keys }); say(o, act1.checked ? 'Switched on.' : 'Switched off.', true); } catch (e) { say(o, e.message); act1.checked = !act1.checked; } };
     const baseWrap = h('div', {}, h('label', {}, 'API base URL'), base);
@@ -756,9 +762,10 @@ async function brainView(body) {
     // 2.3.2: grey out what the model can't do (from the last Test), with a one-line reason. Untested = like 2.3.1.
     // 2.3.9: a Test of the typed (unsaved) values counts while the type, address and model are still the ones tested.
     let draft = null;
-    const setupSig = () => [kind.value === 'gemini' ? 'gemini' : 'openai', kind.value === 'gemini' ? '' : (kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value).trim().replace(/\/+$/, ''), kmodel.value.trim()].join('|');
+    const kindOf = (v) => v === 'gemini' ? 'gemini' : v === 'cloudflare' ? 'cloudflare' : 'openai';
+    const setupSig = () => [kindOf(kind.value), kind.value === 'gemini' ? '' : kind.value === 'cloudflare' ? acct.value.trim().toLowerCase() : (kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value).trim().replace(/\/+$/, ''), kmodel.value.trim()].join('|');
     const applySupport = () => {
-      const v = kind.value, kindNow = v === 'gemini' ? 'gemini' : 'openai';
+      const v = kind.value, kindNow = kindOf(v);
       if (draft && draft.sig === setupSig() && draft.use_support) {
         for (const u of USE_ORDER) {
           const s = draft.use_support[u] || { ok: null, why: '' };
@@ -771,7 +778,8 @@ async function brainView(body) {
       const sameSetup = k && k.kind === kindNow;
       const sup = sameSetup && k.use_support ? k.use_support : Object.fromEntries(USE_ORDER.map(u => [u, { ok: null, why: '' }]));
       // 2.3.10: any model that can make pictures; the server's answer (after a Test) says if this one can
-      if (kindNow !== 'gemini' && !(sameSetup && k.use_support)) sup.pictures = { ok: false, why: 'Tap Test to check if this model can make pictures' };
+      if (kindNow === 'openai' && !(sameSetup && k.use_support)) sup.pictures = { ok: false, why: 'Tap Test to check if this model can make pictures' };
+      if (kindNow === 'cloudflare' && !(sameSetup && k.use_support)) { for (const u of USE_ORDER) sup[u] = { ok: false, why: 'Cloudflare keys only make pictures' }; sup.pictures = { ok: null, why: '' }; }
       for (const u of USE_ORDER) {
         const s = sup[u] || { ok: null, why: '' };
         useBoxes[u].disabled = s.ok === false; if (s.ok === false) useBoxes[u].checked = false;
@@ -780,32 +788,38 @@ async function brainView(body) {
       }
       capsWrap.replaceChildren(sameSetup || !k ? capsView(k) : h('p', { class: 'fine capnone', 'data-caps': 'none' }, 'Tap Test to check what this model can do.'));
     };
-    const defaultsFor = (v) => v === 'gemini' ? ['chat', 'pictures', 'media', 'background'] : ['chat', 'coding'];
+    const defaultsFor = (v) => v === 'gemini' ? ['chat', 'pictures', 'media', 'background'] : v === 'cloudflare' ? ['pictures'] : ['chat', 'coding'];
     const setUses = (list) => USE_ORDER.forEach(u => { useBoxes[u].checked = list.includes(u); });
     setUses(k ? k.use_for : defaultsFor('gemini'));
     const sync = (fromUser) => {
-      const v = kind.value; baseWrap.hidden = v !== 'openai';
+      const v = kind.value; baseWrap.hidden = v !== 'openai'; acctWrap.hidden = v !== 'cloudflare';
+      keyLabel.textContent = v === 'cloudflare' ? 'API token' : 'Key';
+      if (!(k && k.has_key)) kkey.placeholder = v === 'cloudflare' ? 'paste the API token' : 'paste the key';
+      if (v === 'cloudflare' && fromUser && (!kmodel.value || isNew || (k && k.kind !== 'cloudflare'))) kmodel.value = CF_MODEL;
+      if (v !== 'cloudflare' && fromUser && kmodel.value.startsWith('@cf/')) kmodel.value = '';
       base.placeholder = v === 'openai' ? 'https://openrouter.ai/api/v1' : 'https://…/v1';   // 2.3.9: the usual address for OpenRouter
       if (v === 'groq' && fromUser) { base.value = K.groq.base_url; if (!kmodel.value || isNew) kmodel.value = K.groq.model; }
       if (v === 'openai' && fromUser && base.value === K.groq.base_url) base.value = '';
       if (fromUser && isNew) setUses(defaultsFor(v));
       applySupport();
-      kmodel.placeholder = v === 'gemini' ? 'empty = default (' + (K.default_model || 'gemini-3.6-flash') + ')' : v === 'groq' ? K.groq.model : 'model name (tap Test to see the list)';
+      kmodel.placeholder = v === 'gemini' ? 'empty = default (' + (K.default_model || 'gemini-3.6-flash') + ')' : v === 'groq' ? K.groq.model : v === 'cloudflare' ? CF_MODEL : 'model name (tap Test to see the list)';
       help.replaceChildren(...(v === 'gemini' ? ['Get a free key: ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener' }, 'aistudio.google.com/apikey'), ' → Create API key. A key from another Google project has its own free limit.']
         : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. Tap Test: it checks the key and what the model can do (most Groq models can\'t hear voice notes or see photos). No need to save first.']
+          : v === 'cloudflare' ? [h('b', {}, 'Free: '), 'Cloudflare gives a small amount of pictures each day. 1) ', h('a', { href: 'https://dash.cloudflare.com', target: '_blank', rel: 'noopener' }, 'dash.cloudflare.com'), ' → sign up. 2) Copy Account ID (right side of the account home page). 3) My Profile → API Tokens → Create Token → \u2018Workers AI\u2019 template → Create → copy. Paste both here, tap Test.']
           : ['Any OpenAI-compatible API (OpenRouter, OpenAI, a local server…). For OpenRouter the address is https://openrouter.ai/api/v1. Tap Test to check the key and see its models — no need to save first.']));
     };
     kind.onchange = () => sync(true); sync(isNew);
     const models = h('div', { class: 'kmodelswrap' });
     let draftMode = false;     // 2.3.9: the list came from a Test of unsaved values → a tap only fills the Model field
     const showModels = (list) => {
-      models.replaceChildren(...(list && list.length ? [h('p', { class: 'fine' }, 'Models this key can use — tap one to choose it:'), h('div', { class: 'kmodels' }, list.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === (kmodel.value || k?.effective_model) ? ' on' : ''), 'data-model': m,
+      models.replaceChildren(...(list && list.length ? [h('p', { class: 'fine' }, kind.value === 'cloudflare' ? 'Picture models on your Cloudflare account — tap one to choose it:' : 'Models this key can use — tap one to choose it:'), h('div', { class: 'kmodels' }, list.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === (kmodel.value || k?.effective_model) ? ' on' : ''), 'data-model': m,
         onclick: async () => { kmodel.value = m; if (!isNew && !draftMode) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); say(to, `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } } showModels(list); } }, m)))] : []));
     };
     if (k && testOut[k.id]) { say(to, testMsg(testOut[k.id]), testOut[k.id].ok); showModels(testOut[k.id].models); }
     const body = () => {
-      const b = { name: kname.value, kind: kind.value === 'gemini' ? 'gemini' : 'openai', model: kmodel.value, active: act1.checked, use_for: USE_ORDER.filter(u => useBoxes[u].checked) };
-      if (kind.value !== 'gemini') b.base_url = kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value;
+      const b = { name: kname.value, kind: kindOf(kind.value), model: kmodel.value, active: act1.checked, use_for: USE_ORDER.filter(u => useBoxes[u].checked) };
+      if (kind.value === 'cloudflare') b.account_id = acct.value.trim();
+      else if (kind.value !== 'gemini') b.base_url = kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value;
       if (kkey.value) b.key = kkey.value;
       return b;
     };
@@ -815,10 +829,10 @@ async function brainView(body) {
     };
     // 2.3.9: Test works before saving. A new key, or an edited key whose typed values differ from the saved ones,
     // is tested as typed (an empty key field = the saved key) and nothing is saved.
-    const typedChanged = () => !k || !!kkey.value.trim() || setupSig() !== [k.kind, k.kind === 'openai' ? String(k.base_url || '').replace(/\/+$/, '') : '', String(k.model || '')].join('|');
+    const typedChanged = () => !k || !!kkey.value.trim() || setupSig() !== [k.kind, k.kind === 'openai' ? String(k.base_url || '').replace(/\/+$/, '') : k.kind === 'cloudflare' ? String(k.account_id || '') : '', String(k.model || '')].join('|');
     const test = async (e) => {
       if (typedChanged()) {
-        const b = body(); const tb = { kind: b.kind, base_url: b.base_url, model: b.model, key: b.key, name: b.name, use_for: b.use_for };
+        const b = body(); const tb = { kind: b.kind, base_url: b.base_url, account_id: b.account_id, model: b.model, key: b.key, name: b.name, use_for: b.use_for };
         if (k) tb.id = k.id;
         const sig = setupSig();
         const msg = (r) => testMsg(r) + (r.ok ? `\nNot saved yet — tap ${isNew ? 'Add key' : 'Save'} to keep it.` : '');
@@ -848,9 +862,9 @@ async function brainView(body) {
         k ? h('div', { class: 'sheetstat' }, h('span', { class: 'pill ' + cls }, st), h('span', { class: 'fine' }, [k.last_used ? 'Last used ' + ago(k.last_used) : 'Never used', k.last_error ? 'Last error: ' + k.last_error : ''].filter(Boolean).join(' · '))) : null,
         h('div', { class: 'switch' }, h('label', { for: 'kactive', style: 'margin:0;color:var(--text)' }, 'Active'), act1),
         h('label', {}, 'Name / description'), kname,
-        h('label', {}, 'Type'), kind, help, baseWrap,
+        h('label', {}, 'Type'), kind, help, baseWrap, acctWrap,
         h('label', {}, 'Model'), kmodel, models,
-        h('label', {}, 'Key'), kkey,
+        keyLabel, kkey,
         h('label', {}, 'Use for'), capsWrap, usesWrap,
         h('p', { class: 'fine' }, 'The assistant picks this key for the jobs ticked here. If it is busy or out of limit, another key takes over.'),
         h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', 'data-save': '1', onclick: save }, isNew ? 'Add key' : 'Save'),

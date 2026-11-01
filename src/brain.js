@@ -335,6 +335,11 @@ export async function probeCaps(k, key, { model, allModels = null, modalities = 
     set('pictures', { ok: d.ok, why: d.ok ? '' : d.why });
     if (d.ok) { found.pictures_via = d.via; if (d.guess) { found.pictures_guess = true; found.why.pictures = d.why; } }
   };
+  if (k.kind === 'cloudflare') {      // 2.3.11: Cloudflare keys only make pictures (checked by cfTest; no picture is made)
+    for (const c of ['text', 'images', 'audio', 'pdf', 'tools']) set(c, { ok: false, why: aikeys.CF_ONLY });
+    found.files_text = false; set('pictures', { ok: true });
+    return found;
+  }
   if (picturesOnly && k.kind !== 'gemini') {      // a picture-only model (no chat): nothing else to check
     const no = 'this model only makes pictures';
     for (const c of ['text', 'images', 'audio', 'pdf', 'tools']) set(c, { ok: false, why: no });
@@ -394,7 +399,7 @@ export async function probeCaps(k, key, { model, allModels = null, modalities = 
 }
 /** 2.3.10: a non-Gemini model that can make pictures: the box is available but he ticks it himself (usually paid). */
 function picNote(r, sup, uses, before) {
-  if (r.kind === 'gemini' || sup.pictures?.ok !== true || uses.includes('pictures')) return '';
+  if (r.kind === 'gemini' || r.kind === 'cloudflare' || sup.pictures?.ok !== true || uses.includes('pictures')) return '';
   return (before ? ' ' : '') + 'This model can make pictures: tick Pictures to use it for that (picture models usually cost money).';
 }
 /** After a working Test: probe, store, auto-tick, write one Activity line. */
@@ -485,6 +490,19 @@ async function runKeyTest(k, key, h) {
     catch (e) { throw keyFail(classify({ networkError: e.cause?.code || e.message, provider })); }
   };
   try {
+    if (k.kind === 'cloudflare') {      // 2.3.11: token check + the account's picture models; no picture is made
+      const { cfTest } = await import('./cloudflare.js');
+      const t = await cfTest({ accountId: k.base_url, token: key, model: k.model });
+      if (!t.ok) {
+        const setup = ['bad_token', 'no_permission', 'wrong_account', 'model'].includes(t.problem);
+        if (t.problem !== 'no_key') h.onFail({ kind: setup ? 'bad_key' : 'other', reason: t.message.replace(/^✗ /, ''), until: 0, problem: setup ? t.message.replace(/^✗ /, '').slice(0, 120) : null });
+        const { problem, ...rest } = t;
+        return { ...rest, cf_problem: problem };
+      }
+      h.onOk();
+      const tc = await h.caps(t.model, t.models);
+      return { ...t, ...tc };
+    }
     if (k.kind === 'gemini') {
       if (!key) return { ok: false, message: h.noKey, models: [] };
       const base = cfg.geminiBase || 'https://generativelanguage.googleapis.com';

@@ -1,1 +1,1 @@
-{"version": "2.3.10", "date": "2026-11-01", "notes": "Pictures now work with any key whose model can make pictures. Tap Test on the key to check. (OpenRouter's picture models are paid.)"}
+{"version": "2.3.11", "date": "2026-11-01", "notes": "New: free pictures with your own Cloudflare account (Settings → Brain → AI keys → Add key → Cloudflare). When Gemini's picture limit runs out, it uses Cloudflare."}
