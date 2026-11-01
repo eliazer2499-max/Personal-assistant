@@ -2,7 +2,7 @@
 // background job runner. A job is an agent loop that can take many steps (default up to 40 model
 // steps / 60 minutes), showing each tool step live in the chat.
 import { cfg } from './config.js';
-import { all, get, run, now, setting, secret, redact, log, audit } from './db.js';
+import { all, get, run, now, setting, secret, redact, log, audit, rememberSecret } from './db.js';
 import { declarations, execTool, summarizeArgs } from './tools/index.js';
 import { browserGuide } from './tools/browser.js';
 import { addMessage, deliver } from './notify.js';
@@ -405,15 +405,68 @@ export async function testKey(id) {
   const k = aikeys.keyRow(id);
   if (!k) throw aikeys.httpErr(404, 'That key was removed');
   const key = aikeys.keyValue(k.id);
+  return runKeyTest(k, key, {
+    onFail: (c) => aikeys.markFail(k.id, c, { fromTest: true }),
+    onOk: () => aikeys.markTested(k.id),
+    caps: (model, all) => testCaps(k, key, model, all),
+    noKey: '✗ No key saved — paste it and tap Save.',
+    noModel: '✗ No model chosen — tap one from the list below, then Save.',
+  });
+}
+
+/**
+ * 2.3.9: Test what he typed in the Add-key sheet, before saving. Same checks and the same answer as the saved-key
+ * Test, but nothing is written: no key, no status, no caps, no "Use for", no Activity line. The typed key is
+ * added to the redaction list first and wiped from the answer, so it can't show up in a log, an error or the reply.
+ */
+export async function testDraft(b) {
+  const { k, key, stored } = aikeys.draftKey(b || {});
+  rememberSecret(key);
+  const hide = (v) => {
+    if (typeof v === 'string') { let t = redact(v); if (key && key.length >= 4) t = t.split(key).join('[hidden]'); return t; }
+    if (Array.isArray(v)) return v.map(hide);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([x, y]) => [x, hide(y)]));
+    return v;
+  };
+  const r = await runKeyTest(k, key, {
+    onFail: () => {}, onOk: () => {},
+    caps: (model, all) => draftCaps(k, key, model, all),
+    noKey: '✗ Paste the key first, then tap Test.',
+    noModel: '✗ No model chosen — tap one from the list below.',
+  });
+  return hide({ ...r, saved: false, used_saved_key: stored });
+}
+async function draftCaps(k, key, model, allModels) {
+  let found;
+  try { found = await probeCaps(k, key, { model, allModels }); }
+  catch (e) { log('caps probe failed (unsaved key):', e.message); return {}; }
+  const row = { ...k };      // a blank Gemini model = the default model, same as a saved key
+  const caps = aikeys.buildCaps(row, found, null);
+  const sup = aikeys.useSupport({ ...row, caps: JSON.stringify(caps) });
+  const cur = aikeys.usesOf(row);
+  const next = aikeys.USES.filter(u => sup[u].ok === true || (sup[u].ok === null && cur.includes(u)));
+  const added = next.filter(u => !cur.includes(u)), removed = cur.filter(u => !next.includes(u));
+  const lim = Object.entries(caps.unchecked || {}).filter(([, w]) => w === 'limit').map(([c]) => aikeys.CAP_LABELS[c].toLowerCase());
+  const other = Object.keys(caps.unchecked || {}).filter(c => caps.unchecked[c] !== 'limit').map(c => aikeys.CAP_LABELS[c].toLowerCase());
+  const lbl = (u) => aikeys.USE_LABELS[u];
+  const cant = aikeys.USES.filter(u => sup[u].ok === false);
+  let caps_note = [added.length ? 'Ticked ' + added.map(lbl).join(', ') + '.' : '', cant.length ? 'Greyed out: ' + cant.map(lbl).join(', ') + '.' : ''].filter(Boolean).join(' ');
+  if (lim.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${lim.join(', ')} (limit reached) — tap Test again later.`;
+  else if (other.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${other.join(', ')} — tap Test again later.`;
+  return { caps, caps_line: aikeys.capsLine(caps), caps_note, uses_added: added, uses_removed: removed, use_for: next, use_support: sup };
+}
+
+/** The checks behind both Tests. h.onFail / h.onOk / h.caps decide what (if anything) is recorded. */
+async function runKeyTest(k, key, h) {
   const provider = k.kind === 'gemini' ? 'gemini' : 'openai';
-  const fail = (c, models, model) => { aikeys.markFail(k.id, c, { fromTest: true }); return { ok: false, message: '✗ ' + c.reason, models: models || [], model, model_listed: models && model ? models.includes(model) : undefined }; };
+  const fail = (c, models, model) => { h.onFail(c); return { ok: false, message: '✗ ' + c.reason, models: models || [], model, model_listed: models && model ? models.includes(model) : undefined }; };
   const get1 = async (url, init) => {
     try { return await fetch(url, { ...init, signal: AbortSignal.timeout(30000) }); }
     catch (e) { throw keyFail(classify({ networkError: e.cause?.code || e.message, provider })); }
   };
   try {
     if (k.kind === 'gemini') {
-      if (!key) return { ok: false, message: '✗ No key saved — paste it and tap Save.', models: [] };
+      if (!key) return { ok: false, message: h.noKey, models: [] };
       const base = cfg.geminiBase || 'https://generativelanguage.googleapis.com';
       const lr = await get1(base + '/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key } });
       if (!lr.ok) return fail(classify({ status: lr.status, text: await lr.text().catch(() => ''), headers: lr.headers, provider }));
@@ -425,8 +478,8 @@ export async function testKey(id) {
       const r = await get1(`${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Reply with the word OK.' }] }] }) });
       if (!r.ok) return fail(classify({ status: r.status, text: await r.text().catch(() => ''), headers: r.headers, provider }), models, model);
-      aikeys.markTested(k.id);
-      const tc = await testCaps(k, key, model, all);
+      h.onOk();
+      const tc = await h.caps(model, all);
       return { ok: true, message: `✓ Works (${model})`, model, model_listed: all.includes(model), models, ...tc };
     }
     const base = String(k.base_url || '').replace(/\/+$/, '');
@@ -436,13 +489,13 @@ export async function testKey(id) {
     if (lr.ok) { const lj = await lr.json().catch(() => ({})); models = (lj.data || lj.models || []).map(m => m.id || m.name).filter(Boolean).map(String).sort(); }
     else if (lr.status === 401 || lr.status === 403) return fail(classify({ status: lr.status, text: await lr.text().catch(() => ''), headers: lr.headers, provider }));
     else listNote = ' (this provider did not give a model list)';
-    if (!k.model) return { ok: false, message: '✗ No model chosen — tap one from the list below, then Save.' + listNote, models };
+    if (!k.model) return { ok: false, message: h.noModel + listNote, models };
     const r = await get1(base + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ model: k.model, messages: [{ role: 'user', content: 'Reply with the word OK.' }] }) });
     if (!r.ok) return fail(classify({ status: r.status, text: await r.text().catch(() => ''), headers: r.headers, provider }), models, k.model);
-    aikeys.markTested(k.id);
+    h.onOk();
     const listed = models.length ? models.includes(k.model) : undefined;
-    const tc = await testCaps(k, key, k.model, models);
+    const tc = await h.caps(k.model, models);
     return { ok: true, message: `✓ Works (${k.model})${listed === false ? ' — but it is not in this key\'s model list' : ''}`, model: k.model, model_listed: listed, models, ...tc };
   } catch (e) {
     if (e.keyFail) return fail(e.keyFail);

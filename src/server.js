@@ -6,7 +6,7 @@ import { cfg, APP_DIR, VERSION } from './config.js';
 import { loadMasterKey } from './crypto.js';
 import { openDb, all, get, run, now, setting, setSetting, allSettings, secret, setSecret, hasSecret, audit, log, redact } from './db.js';
 import * as auth from './auth.js';
-import { startJob, cancelJob, recoverJobs, geminiModels, testKey } from './brain.js';
+import { startJob, cancelJob, recoverJobs, geminiModels, testKey, testDraft } from './brain.js';
 import * as aikeys from './aikeys.js';
 import { registerBrowserRoutes } from './browser-web.js';
 import { addMessage } from './notify.js';
@@ -174,6 +174,16 @@ R('POST', /^\/api\/brain\/keys$/, (c) => { try { return { key: aikeys.addKey(c.b
 R('POST', /^\/api\/brain\/keys\/(\d+)$/, (c) => { try { return { key: aikeys.updateKey(c.m[1], c.body), keys: aikeys.listKeys() }; } catch (e) { keyErr(e); } });
 R('POST', /^\/api\/brain\/keys\/(\d+)\/delete$/, (c) => { try { aikeys.removeKey(c.m[1]); return { ok: true, keys: aikeys.listKeys() }; } catch (e) { keyErr(e); } });
 R('POST', /^\/api\/brain\/keys\/(\d+)\/move$/, (c) => { try { return { keys: aikeys.moveKey(c.m[1], c.body.dir === 'up' ? 'up' : 'down') }; } catch (e) { keyErr(e); } });
+// 2.3.9: Test what is typed in the Add-key / edit sheet without saving anything (10 a minute).
+const draftTests = [];
+export function resetKeyTestLimit() { draftTests.length = 0; }   // tests only
+R('POST', /^\/api\/brain\/keys\/test$/, async (c) => {
+  const t = Date.now();
+  while (draftTests.length && draftTests[0] <= t - 60000) draftTests.shift();
+  if (draftTests.length >= 10) throw auth.httpErr(429, 'That was a lot of tests in one minute. Wait a minute, then tap Test again.');
+  draftTests.push(t);
+  try { return await testDraft(c.body); } catch (e) { keyErr(e); }
+});
 R('POST', /^\/api\/brain\/keys\/(\d+)\/test$/, async (c) => { try { const r = await testKey(c.m[1]); return { ...r, key: aikeys.publicKey(aikeys.keyRow(c.m[1])) }; } catch (e) { keyErr(e); } });
 // 2.2's "Check key": tests the first Gemini key
 R('POST', /^\/api\/brain\/test$/, async () => {

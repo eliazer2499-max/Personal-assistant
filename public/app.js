@@ -753,8 +753,20 @@ async function brainView(body) {
     }));
     const capsWrap = h('div', { class: 'capsbox' });
     // 2.3.2: grey out what the model can't do (from the last Test), with a one-line reason. Untested = like 2.3.1.
+    // 2.3.9: a Test of the typed (unsaved) values counts while the type, address and model are still the ones tested.
+    let draft = null;
+    const setupSig = () => [kind.value === 'gemini' ? 'gemini' : 'openai', kind.value === 'gemini' ? '' : (kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value).trim().replace(/\/+$/, ''), kmodel.value.trim()].join('|');
     const applySupport = () => {
       const v = kind.value, kindNow = v === 'gemini' ? 'gemini' : 'openai';
+      if (draft && draft.sig === setupSig() && draft.use_support) {
+        for (const u of USE_ORDER) {
+          const s = draft.use_support[u] || { ok: null, why: '' };
+          useBoxes[u].disabled = s.ok === false; if (s.ok === false) useBoxes[u].checked = false;
+          useWhy[u].textContent = s.why || ''; useWhy[u].hidden = !s.why;
+          useWhy[u].className = 'usewhy' + (s.ok === false ? ' no' : '');
+        }
+        return capsWrap.replaceChildren(capsView({ caps: draft.caps, caps_fresh: true, kind: kindNow, effective_model: draft.caps.model }));
+      }
       const sameSetup = k && k.kind === kindNow;
       const sup = sameSetup && k.use_support ? k.use_support : Object.fromEntries(USE_ORDER.map(u => [u, { ok: null, why: '' }]));
       if (kindNow !== 'gemini') sup.pictures = { ok: false, why: 'Pictures need a Gemini key' };
@@ -764,27 +776,29 @@ async function brainView(body) {
         useWhy[u].textContent = s.why || ''; useWhy[u].hidden = !s.why;
         useWhy[u].className = 'usewhy' + (s.ok === false ? ' no' : '');
       }
-      capsWrap.replaceChildren(sameSetup || !k ? capsView(k) : h('p', { class: 'fine capnone', 'data-caps': 'none' }, 'Save, then tap Test to check what this model can do.'));
+      capsWrap.replaceChildren(sameSetup || !k ? capsView(k) : h('p', { class: 'fine capnone', 'data-caps': 'none' }, 'Tap Test to check what this model can do.'));
     };
     const defaultsFor = (v) => v === 'gemini' ? ['chat', 'pictures', 'media', 'background'] : ['chat', 'coding'];
     const setUses = (list) => USE_ORDER.forEach(u => { useBoxes[u].checked = list.includes(u); });
     setUses(k ? k.use_for : defaultsFor('gemini'));
     const sync = (fromUser) => {
       const v = kind.value; baseWrap.hidden = v !== 'openai';
+      base.placeholder = v === 'openai' ? 'https://openrouter.ai/api/v1' : 'https://…/v1';   // 2.3.9: the usual address for OpenRouter
       if (v === 'groq' && fromUser) { base.value = K.groq.base_url; if (!kmodel.value || isNew) kmodel.value = K.groq.model; }
       if (v === 'openai' && fromUser && base.value === K.groq.base_url) base.value = '';
       if (fromUser && isNew) setUses(defaultsFor(v));
       applySupport();
       kmodel.placeholder = v === 'gemini' ? 'empty = default (' + (K.default_model || 'gemini-3.6-flash') + ')' : v === 'groq' ? K.groq.model : 'model name (tap Test to see the list)';
       help.replaceChildren(...(v === 'gemini' ? ['Get a free key: ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener' }, 'aistudio.google.com/apikey'), ' → Create API key. A key from another Google project has its own free limit.']
-        : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. After saving, tap Test: it checks what the model can do (most Groq models can\'t hear voice notes or see photos).']
-          : ['Any OpenAI-compatible API (OpenRouter, OpenAI, a local server…). After saving, tap Test: it checks what the model can do.']));
+        : v === 'groq' ? ['Get a free key: ', h('a', { href: 'https://console.groq.com/keys', target: '_blank', rel: 'noopener' }, 'console.groq.com/keys'), ' → Create API Key. Tap Test: it checks the key and what the model can do (most Groq models can\'t hear voice notes or see photos). No need to save first.']
+          : ['Any OpenAI-compatible API (OpenRouter, OpenAI, a local server…). For OpenRouter the address is https://openrouter.ai/api/v1. Tap Test to check the key and see its models — no need to save first.']));
     };
     kind.onchange = () => sync(true); sync(isNew);
     const models = h('div', { class: 'kmodelswrap' });
+    let draftMode = false;     // 2.3.9: the list came from a Test of unsaved values → a tap only fills the Model field
     const showModels = (list) => {
       models.replaceChildren(...(list && list.length ? [h('p', { class: 'fine' }, 'Models this key can use — tap one to choose it:'), h('div', { class: 'kmodels' }, list.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === (kmodel.value || k?.effective_model) ? ' on' : ''), 'data-model': m,
-        onclick: async () => { kmodel.value = m; if (!isNew) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); say(to, `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } } showModels(list); } }, m)))] : []));
+        onclick: async () => { kmodel.value = m; if (!isNew && !draftMode) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); say(to, `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } } showModels(list); } }, m)))] : []));
     };
     if (k && testOut[k.id]) { say(to, testMsg(testOut[k.id]), testOut[k.id].ok); showModels(testOut[k.id].models); }
     const body = () => {
@@ -797,10 +811,27 @@ async function brainView(body) {
       const x = await act(e.target, o, () => api(isNew ? '/api/brain/keys' : `/api/brain/keys/${k.id}`, body()), 'Saved.');
       if (x) { kkey.value = ''; await paintKeys({ ...K, keys: x.keys }); closeSheet(); }
     };
+    // 2.3.9: Test works before saving. A new key, or an edited key whose typed values differ from the saved ones,
+    // is tested as typed (an empty key field = the saved key) and nothing is saved.
+    const typedChanged = () => !k || !!kkey.value.trim() || setupSig() !== [k.kind, k.kind === 'openai' ? String(k.base_url || '').replace(/\/+$/, '') : '', String(k.model || '')].join('|');
     const test = async (e) => {
-      if (isNew) return say(to, 'Save the key first, then tap Test.');
+      if (typedChanged()) {
+        const b = body(); const tb = { kind: b.kind, base_url: b.base_url, model: b.model, key: b.key, name: b.name, use_for: b.use_for };
+        if (k) tb.id = k.id;
+        const sig = setupSig();
+        const msg = (r) => testMsg(r) + (r.ok ? `\nNot saved yet — tap ${isNew ? 'Add key' : 'Save'} to keep it.` : '');
+        const x = await act(e.target, to, () => api('/api/brain/keys/test', tb), msg);
+        if (x) {
+          say(to, msg(x), x.ok); draftMode = true; showModels(x.models);
+          draft = x.caps ? { sig, caps: x.caps, use_support: x.use_support } : null;
+          if (x.caps && x.use_for) setUses(x.use_for);
+          applySupport();
+        }
+        return;
+      }
       const x = await act(e.target, to, () => api(`/api/brain/keys/${k.id}/test`, {}), testMsg);
       if (x) {
+        draftMode = false; draft = null;
         testOut[k.id] = x; showModels(x.models);
         if (x.key) { k = x.key; if (x.caps) setUses(k.use_for); applySupport(); }     // ticks what it can do, greys out the rest
         paintKeys();
@@ -821,7 +852,7 @@ async function brainView(body) {
         h('label', {}, 'Use for'), capsWrap, usesWrap,
         h('p', { class: 'fine' }, 'The assistant picks this key for the jobs ticked here. If it is busy or out of limit, another key takes over.'),
         h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', 'data-save': '1', onclick: save }, isNew ? 'Add key' : 'Save'),
-          k ? h('button', { 'data-test': k.id, onclick: test }, 'Test') : null), o, to,
+          h('button', { 'data-test': k ? k.id : 'new', onclick: test }, 'Test')), o, to,
         k ? h('div', { class: 'row', style: 'margin-top:4px' },
           h('button', { class: 'small', 'aria-label': 'Move up', disabled: idx <= 0, onclick: move('up') }, '↑ Higher'),
           h('button', { class: 'small', 'aria-label': 'Move down', disabled: idx === K.keys.length - 1, onclick: move('down') }, '↓ Lower')) : null,

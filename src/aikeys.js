@@ -87,7 +87,12 @@ export function capsLine(c) {
 /** Test found new caps: store them (keeping an older answer for anything that could not be checked this time). */
 export function saveCaps(id, found) {
   const r = keyRow(id); if (!r) return null;
-  const old = freshCaps(r);
+  const c = buildCaps(r, found, freshCaps(r));
+  run('UPDATE ai_keys SET caps=? WHERE id=?', JSON.stringify(c), id);
+  return c;
+}
+/** 2.3.9: the caps object for a key setup (saved or not yet saved). Nothing is stored here. */
+export function buildCaps(r, found, old = null) {
   const c = { v: 1, kind: r.kind, model: effModel(r), base_url: r.kind === 'openai' ? (r.base_url || '') : '', checked_at: now(), unchecked: {} };
   for (const k of [...CAPS, 'files_text']) {
     const val = found[k];
@@ -95,7 +100,6 @@ export function saveCaps(id, found) {
     else { c[k] = old && (old[k] === true || old[k] === false) ? old[k] : null; if (k !== 'files_text') c.unchecked[k] = found.why?.[k] || 'not checked'; }
   }
   if (found.why) c.why = Object.fromEntries(Object.entries(found.why).map(([k, w]) => [k, redact(String(w)).slice(0, 160)]));
-  run('UPDATE ai_keys SET caps=? WHERE id=?', JSON.stringify(c), id);
   return c;
 }
 /** After a Test: tick every "Use for" the model can do, untick the ones it can't; leave the unknown ones as they were. */
@@ -189,6 +193,25 @@ export function addKey(b) {
   const id = insertKey(k, value);
   audit('owner', 'brain.key_added', `"${k.name}" (${kind === 'gemini' ? 'Gemini' : 'OpenAI-compatible'}${k.active ? ', active' : ', inactive'})`);
   return publicKey(keyRow(id));
+}
+/**
+ * 2.3.9: "Test" in the Add-key sheet. Checks what he typed (type, address, model, key) without saving.
+ * b.id = the key being edited: an empty key field means "use the key already saved for it".
+ * Returns a key-like object (id null, nothing in the database) and the key value to try.
+ */
+export function draftKey(b) {
+  ensureKeys();
+  const kind = cleanKind(b.kind);
+  const hasId = b.id !== undefined && b.id !== null && b.id !== '';
+  const r = hasId ? keyRow(b.id) : null;
+  if (hasId && !r) throw httpErr(404, 'That key was removed');
+  const base_url = kind === 'openai' ? cleanBase(b.base_url) : '';
+  const model = String(b.model ?? '').trim() ? cleanModel(b.model, kind) : '';
+  let value = String(b.key ?? '').trim(), stored = false;
+  if (value.length > 1000 || /\s/.test(value)) throw httpErr(400, 'That doesn\'t look like a key. Paste just the key.');
+  if (!value && r) { value = String(keyValue(r.id) || '').trim(); stored = !!value; }
+  const name = String(b.name ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 80) || (r ? r.name : 'New key');
+  return { k: { id: null, name, kind, base_url, model, use_for: cleanUses(b.use_for, kind).join(',') }, key: value, stored };
 }
 export function updateKey(id, b) {
   const r = keyRow(id); if (!r) throw httpErr(404, 'That key was removed');
