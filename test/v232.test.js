@@ -183,7 +183,7 @@ test('Test on Groq (gpt-oss): chat ✓ tools ✓ photos ✗ voice ✗; Voice/pho
   assert.deepEqual(x.key.use_for, ['chat', 'coding', 'background']);
   assert.deepEqual(x.uses_removed, ['media']); assert.deepEqual(x.uses_added, ['background']);
   assert.equal(x.key.use_support.media.ok, false); assert.match(x.key.use_support.media.why, /can't see photos, hear voice notes or read PDFs/);
-  assert.equal(x.key.use_support.pictures.ok, false); assert.match(x.key.use_support.pictures.why, /Gemini/);
+  assert.equal(x.key.use_support.pictures.ok, false); assert.match(x.key.use_support.pictures.why, /This model can't make pictures/);   // 2.3.10 wording (was: needs a Gemini key)
   assert.match(lastTested(), /^Tested 'Groq': chat ✓ tools ✓ photos ✗ voice ✗ PDF ✗ pictures ✗/);
   assert.equal(x.caps_note, 'Ticked Background jobs. Greyed out: Pictures, Voice, photos & files.');
   // only 3 probes for OpenAI-compatible (photo, voice, tools) + the text call; PDFs/pictures are not called

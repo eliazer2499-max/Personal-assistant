@@ -666,7 +666,8 @@ function whoDoesWhat(keys) {
   return USE_ORDER.map(u => {
     const can = (k) => (k.use_support?.[u]?.ok ?? null) !== false;          // 2.3.2: Test showed it can't → not picked
     const hears = (k) => k.use_support?.media?.ok === true || (k.kind === 'gemini' && can(k));
-    const pool = (u === 'pictures' ? keys.filter(k => k.kind === 'gemini') : keys).filter(can);
+    // 2.3.10: pictures = Gemini keys, or another key he ticked "Pictures" on whose Test said its model can
+    const pool = (u === 'pictures' ? keys.filter(k => k.kind === 'gemini' || (k.use_for.includes('pictures') && k.use_support?.pictures?.ok === true)) : keys).filter(can);
     const tagged = (u === 'media' ? pool.find(k => free(k) && k.use_for.includes(u) && hears(k)) : null) || pool.find(k => free(k) && k.use_for.includes(u));
     const any = tagged || (u === 'media' ? pool.find(k => free(k) && hears(k)) : null) || pool.find(k => free(k));
     return [u, any, !!tagged];
@@ -769,7 +770,8 @@ async function brainView(body) {
       }
       const sameSetup = k && k.kind === kindNow;
       const sup = sameSetup && k.use_support ? k.use_support : Object.fromEntries(USE_ORDER.map(u => [u, { ok: null, why: '' }]));
-      if (kindNow !== 'gemini') sup.pictures = { ok: false, why: 'Pictures need a Gemini key' };
+      // 2.3.10: any model that can make pictures; the server's answer (after a Test) says if this one can
+      if (kindNow !== 'gemini' && !(sameSetup && k.use_support)) sup.pictures = { ok: false, why: 'Tap Test to check if this model can make pictures' };
       for (const u of USE_ORDER) {
         const s = sup[u] || { ok: null, why: '' };
         useBoxes[u].disabled = s.ok === false; if (s.ok === false) useBoxes[u].checked = false;

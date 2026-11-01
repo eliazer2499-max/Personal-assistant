@@ -11,6 +11,7 @@ import { validateUnsent, claimFiles, filesOfMessage, modelInput, MAX_INLINE } fr
 import * as aikeys from './aikeys.js';
 import { withoutStatusEmoji } from './emoji.js';
 import { classify } from './aikeys.js';
+import { outputModalities, detectPictures } from './pictures.js';
 export { aikeys };
 
 // ---------------- providers ----------------
@@ -325,9 +326,21 @@ async function probeCall(url, headers, body, provider) {
   if (['server', 'network'].includes(c.kind) || r.status === 401 || r.status === 403) return { ok: null, why: c.reason };
   return { ok: false, why: `refused (${r.status}${aikeys.providerMessage(text) ? ': ' + String(aikeys.providerMessage(text)).slice(0, 100) : ''})`, status: r.status, text };
 }
-export async function probeCaps(k, key, { model, allModels = null } = {}) {
+export async function probeCaps(k, key, { model, allModels = null, modalities = null, picturesOnly = false } = {}) {
   const found = { text: true, why: {} };
   const set = (cap, res) => { found[cap] = res.ok; if (res.ok !== true && res.why) found.why[cap] = res.why; };
+  // 2.3.10: pictures for OpenAI-compatible keys — from the model list (or the model's name). No picture is made.
+  const pics = () => {
+    const d = detectPictures(model, modalities || {});
+    set('pictures', { ok: d.ok, why: d.ok ? '' : d.why });
+    if (d.ok) { found.pictures_via = d.via; if (d.guess) { found.pictures_guess = true; found.why.pictures = d.why; } }
+  };
+  if (picturesOnly && k.kind !== 'gemini') {      // a picture-only model (no chat): nothing else to check
+    const no = 'this model only makes pictures';
+    for (const c of ['text', 'images', 'audio', 'pdf', 'tools']) set(c, { ok: false, why: no });
+    found.files_text = false; pics();
+    return found;
+  }
   if (k.kind === 'gemini') {
     const base = cfg.geminiBase || 'https://generativelanguage.googleapis.com';
     const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, hd = { 'x-goog-api-key': key };
@@ -376,13 +389,18 @@ export async function probeCaps(k, key, { model, allModels = null } = {}) {
   set('images', im); set('audio', au); set('tools', tl);
   set('pdf', { ok: false, why: 'PDFs need a Gemini key (Word, Excel, zip and text files are read as text)' });
   found.files_text = true;                       // 2.3.1 already turns Word/Excel/PowerPoint/CSV/zip/code into text for any model
-  set('pictures', { ok: false, why: 'the picture maker needs a Gemini key' });
+  pics();
   return found;
 }
+/** 2.3.10: a non-Gemini model that can make pictures: the box is available but he ticks it himself (usually paid). */
+function picNote(r, sup, uses, before) {
+  if (r.kind === 'gemini' || sup.pictures?.ok !== true || uses.includes('pictures')) return '';
+  return (before ? ' ' : '') + 'This model can make pictures: tick Pictures to use it for that (picture models usually cost money).';
+}
 /** After a working Test: probe, store, auto-tick, write one Activity line. */
-async function testCaps(k, key, model, allModels) {
+async function testCaps(k, key, model, allModels, extra = {}) {
   let found;
-  try { found = await probeCaps(k, key, { model, allModels }); }
+  try { found = await probeCaps(k, key, { model, allModels, ...extra }); }
   catch (e) { log('caps probe failed:', e.message); return {}; }
   const caps = aikeys.saveCaps(k.id, found);
   const { added, removed } = aikeys.applyTestedUses(k.id);
@@ -396,6 +414,7 @@ async function testCaps(k, key, model, allModels) {
   let caps_note = [added.length ? 'Ticked ' + added.map(lbl).join(', ') + '.' : '', cant.length ? 'Greyed out: ' + cant.map(lbl).join(', ') + '.' : ''].filter(Boolean).join(' ');
   if (lim.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${lim.join(', ')} (limit reached) — tap Test again later.`;
   else if (other.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${other.join(', ')} — tap Test again later.`;
+  caps_note += picNote(k, sup, aikeys.usesOf(aikeys.keyRow(k.id)), caps_note);
   return { caps, caps_line: aikeys.capsLine(caps), caps_note, uses_added: added, uses_removed: removed };
 }
 
@@ -408,7 +427,7 @@ export async function testKey(id) {
   return runKeyTest(k, key, {
     onFail: (c) => aikeys.markFail(k.id, c, { fromTest: true }),
     onOk: () => aikeys.markTested(k.id),
-    caps: (model, all) => testCaps(k, key, model, all),
+    caps: (model, all, extra) => testCaps(k, key, model, all, extra),
     noKey: '✗ No key saved — paste it and tap Save.',
     noModel: '✗ No model chosen — tap one from the list below, then Save.',
   });
@@ -430,21 +449,21 @@ export async function testDraft(b) {
   };
   const r = await runKeyTest(k, key, {
     onFail: () => {}, onOk: () => {},
-    caps: (model, all) => draftCaps(k, key, model, all),
+    caps: (model, all, extra) => draftCaps(k, key, model, all, extra),
     noKey: '✗ Paste the key first, then tap Test.',
     noModel: '✗ No model chosen — tap one from the list below.',
   });
   return hide({ ...r, saved: false, used_saved_key: stored });
 }
-async function draftCaps(k, key, model, allModels) {
+async function draftCaps(k, key, model, allModels, extra = {}) {
   let found;
-  try { found = await probeCaps(k, key, { model, allModels }); }
+  try { found = await probeCaps(k, key, { model, allModels, ...extra }); }
   catch (e) { log('caps probe failed (unsaved key):', e.message); return {}; }
   const row = { ...k };      // a blank Gemini model = the default model, same as a saved key
   const caps = aikeys.buildCaps(row, found, null);
   const sup = aikeys.useSupport({ ...row, caps: JSON.stringify(caps) });
   const cur = aikeys.usesOf(row);
-  const next = aikeys.USES.filter(u => sup[u].ok === true || (sup[u].ok === null && cur.includes(u)));
+  const next = aikeys.nextUses(row, sup, cur);
   const added = next.filter(u => !cur.includes(u)), removed = cur.filter(u => !next.includes(u));
   const lim = Object.entries(caps.unchecked || {}).filter(([, w]) => w === 'limit').map(([c]) => aikeys.CAP_LABELS[c].toLowerCase());
   const other = Object.keys(caps.unchecked || {}).filter(c => caps.unchecked[c] !== 'limit').map(c => aikeys.CAP_LABELS[c].toLowerCase());
@@ -453,6 +472,7 @@ async function draftCaps(k, key, model, allModels) {
   let caps_note = [added.length ? 'Ticked ' + added.map(lbl).join(', ') + '.' : '', cant.length ? 'Greyed out: ' + cant.map(lbl).join(', ') + '.' : ''].filter(Boolean).join(' ');
   if (lim.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${lim.join(', ')} (limit reached) — tap Test again later.`;
   else if (other.length) caps_note += `${caps_note ? ' ' : ''}Couldn't check ${other.join(', ')} — tap Test again later.`;
+  caps_note += picNote(row, sup, next, caps_note);
   return { caps, caps_line: aikeys.capsLine(caps), caps_note, uses_added: added, uses_removed: removed, use_for: next, use_support: sup };
 }
 
@@ -484,18 +504,28 @@ async function runKeyTest(k, key, h) {
     }
     const base = String(k.base_url || '').replace(/\/+$/, '');
     const auth = key ? { Authorization: 'Bearer ' + key } : {};
-    let models = [], listNote = '';
+    let models = [], listNote = '', modalities = {};
     const lr = await get1(base + '/models', { headers: auth });
-    if (lr.ok) { const lj = await lr.json().catch(() => ({})); models = (lj.data || lj.models || []).map(m => m.id || m.name).filter(Boolean).map(String).sort(); }
+    if (lr.ok) { const lj = await lr.json().catch(() => ({})); models = (lj.data || lj.models || []).map(m => m.id || m.name).filter(Boolean).map(String).sort(); modalities = outputModalities(lj); }
     else if (lr.status === 401 || lr.status === 403) return fail(classify({ status: lr.status, text: await lr.text().catch(() => ''), headers: lr.headers, provider }));
     else listNote = ' (this provider did not give a model list)';
     if (!k.model) return { ok: false, message: h.noModel + listNote, models };
     const r = await get1(base + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ model: k.model, messages: [{ role: 'user', content: 'Reply with the word OK.' }] }) });
-    if (!r.ok) return fail(classify({ status: r.status, text: await r.text().catch(() => ''), headers: r.headers, provider }), models, k.model);
-    h.onOk();
     const listed = models.length ? models.includes(k.model) : undefined;
-    const tc = await h.caps(k.model, models);
+    if (!r.ok) {
+      const c = classify({ status: r.status, text: await r.text().catch(() => ''), headers: r.headers, provider });
+      // 2.3.10: a picture-only model (e.g. dall-e-3) can't chat; the key still works for pictures
+      const pic = detectPictures(k.model, modalities);
+      if (['model', 'other'].includes(c.kind) && pic.ok && listed !== false && !(modalities[k.model] || []).includes('text')) {
+        h.onOk();
+        const tc = await h.caps(k.model, models, { modalities, picturesOnly: true });
+        return { ok: true, message: `✓ Key works (${k.model}). This model only makes pictures, it can't chat.`, model: k.model, model_listed: listed, models, pictures_only: true, ...tc };
+      }
+      return fail(c, models, k.model);
+    }
+    h.onOk();
+    const tc = await h.caps(k.model, models, { modalities });
     return { ok: true, message: `✓ Works (${k.model})${listed === false ? ' — but it is not in this key\'s model list' : ''}`, model: k.model, model_listed: listed, models, ...tc };
   } catch (e) {
     if (e.keyFail) return fail(e.keyFail);

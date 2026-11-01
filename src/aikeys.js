@@ -56,13 +56,15 @@ export function freshCaps(r) {
   return c;
 }
 const and = (...v) => v.includes(false) ? false : v.includes(null) || v.includes(undefined) ? null : true;
+export const PIC_CANT = 'This model can\'t make pictures';
+const PIC_TEST = 'Tap Test to check if this model can make pictures';
 /** For each "Use for": ok true/false/null (null = not known yet → behave like 2.3.1) and a one-line reason. */
 export function useSupport(r) {
   const c = freshCaps(r);
   const out = {};
   if (!c) {
     for (const u of USES) out[u] = { ok: null, why: '' };
-    if (r.kind !== 'gemini') out.pictures = { ok: false, why: 'Pictures need a Gemini key' };
+    if (r.kind !== 'gemini') out.pictures = { ok: false, why: PIC_TEST };
     return out;
   }
   const v = (k) => c[k] === true ? true : c[k] === false ? false : null;
@@ -71,8 +73,11 @@ export function useSupport(r) {
   const tw = v('tools') === false ? 'This model can\'t use tools, so it can\'t do this' : '';
   out.coding = { ok: and(v('text'), v('tools')), why: tw };
   out.background = { ok: and(v('text'), v('tools')), why: tw };
-  out.pictures = { ok: r.kind !== 'gemini' ? false : v('pictures'),
-    why: r.kind !== 'gemini' ? 'Pictures need a Gemini key' : v('pictures') === false ? 'This key can\'t reach the picture model' : '' };
+  if (r.kind === 'gemini') out.pictures = { ok: v('pictures'), why: v('pictures') === false ? 'This key can\'t reach the picture model' : '' };
+  // 2.3.10: any model that can make pictures. Caps from before 2.3.10 (v1) never checked this → ask for a new Test.
+  else if (!(c.v >= 2)) out.pictures = { ok: false, why: PIC_TEST };
+  else out.pictures = v('pictures') === true ? { ok: true, why: c.pictures_guess ? 'Probably can — will try' : '' }
+    : v('pictures') === false ? { ok: false, why: PIC_CANT } : { ok: null, why: '' };
   const m = [v('images'), v('audio'), v('pdf')];
   const mOk = m.includes(true) ? true : m.every(x => x === false) ? false : null;
   const detail = `photos ${ok(m[0])} voice ${ok(m[1])} PDF ${ok(m[2])}${c.files_text ? ' · Word/Excel/zip as text ✓' : ''}`;
@@ -93,12 +98,13 @@ export function saveCaps(id, found) {
 }
 /** 2.3.9: the caps object for a key setup (saved or not yet saved). Nothing is stored here. */
 export function buildCaps(r, found, old = null) {
-  const c = { v: 1, kind: r.kind, model: effModel(r), base_url: r.kind === 'openai' ? (r.base_url || '') : '', checked_at: now(), unchecked: {} };
+  const c = { v: 2, kind: r.kind, model: effModel(r), base_url: r.kind === 'openai' ? (r.base_url || '') : '', checked_at: now(), unchecked: {} };
   for (const k of [...CAPS, 'files_text']) {
     const val = found[k];
     if (val === true || val === false) c[k] = val;
     else { c[k] = old && (old[k] === true || old[k] === false) ? old[k] : null; if (k !== 'files_text') c.unchecked[k] = found.why?.[k] || 'not checked'; }
   }
+  if (r.kind !== 'gemini' && c.pictures === true && found.pictures === true) { c.pictures_via = found.pictures_via === 'chat' ? 'chat' : 'images'; if (found.pictures_guess) c.pictures_guess = true; }
   if (found.why) c.why = Object.fromEntries(Object.entries(found.why).map(([k, w]) => [k, redact(String(w)).slice(0, 160)]));
   return c;
 }
@@ -106,10 +112,17 @@ export function buildCaps(r, found, old = null) {
 export function applyTestedUses(id) {
   const r = keyRow(id); if (!r) return { added: [], removed: [] };
   const sup = useSupport(r), cur = usesOf(r);
-  const next = USES.filter(u => sup[u].ok === true || (sup[u].ok === null && cur.includes(u)));
+  const next = nextUses(r, sup, cur);
   const added = next.filter(u => !cur.includes(u)), removed = cur.filter(u => !next.includes(u));
   if (added.length || removed.length) run('UPDATE ai_keys SET use_for=? WHERE id=?', next.join(','), id);
   return { added, removed };
+}
+/**
+ * The "Use for" ticks after a Test. 2.3.10: Pictures on a non-Gemini key is never ticked by itself (those picture
+ * models usually cost money): the box is only made available, and he ticks it himself.
+ */
+export function nextUses(r, sup, cur) {
+  return USES.filter(u => (sup[u].ok === true && (u !== 'pictures' || r.kind === 'gemini' || cur.includes(u))) || (sup[u].ok === null && cur.includes(u)));
 }
 /** Can this key take every kind of media in the request? false only when its (current) caps say no. */
 export function cannotTake(r, mediaKinds = []) {
@@ -371,6 +384,17 @@ export function geminiKeys() {
   const free = (r) => !(r.cool_until > t) && !r.problem;
   const noPic = (r) => freshCaps(r)?.pictures === false;          // 2.3.2: Test showed this key can't reach the picture model
   return [...rows.filter(r => free(r) && !noPic(r)), ...rows.filter(r => !free(r) && !noPic(r)), ...rows.filter(r => noPic(r))].map(r => ({ id: r.id, name: r.name, key: keyValue(r.id), tagged: r.tagged }));
+}
+/**
+ * 2.3.10: other keys that may make pictures: active, not Gemini, ticked "Pictures" by him, and their Test showed
+ * the model can (or probably can). In his order; free ones before resting ones.
+ */
+export function otherPictureKeys() {
+  const t = now();
+  const rows = usableKeys({ use: 'pictures' }).filter(r => r.kind !== 'gemini' && r.tagged && useSupport(r).pictures.ok === true);
+  const free = (r) => !(r.cool_until > t) && !r.problem;
+  return [...rows.filter(free), ...rows.filter(r => !free(r))].map(r => ({ id: r.id, name: r.name, key: keyValue(r.id), base_url: r.base_url, model: r.model,
+    pictures_via: freshCaps(r)?.pictures_via || 'images', guess: !!freshCaps(r)?.pictures_guess, tagged: true }));
 }
 export function inUse() {
   const r = setting('ai_key_in_use') && get('SELECT * FROM ai_keys WHERE id=?', Number(setting('ai_key_in_use')));

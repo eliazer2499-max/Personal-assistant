@@ -72,54 +72,84 @@ const imageGenerate = {
     const aikeys = await import('../aikeys.js');
     let keyList = aikeys.geminiKeys().filter(k => k.key);
     if (!keyList.length && secret('gemini_api_key')) keyList = [{ id: 0, name: 'Gemini', key: secret('gemini_api_key') }];
-    if (!keyList.length) return { error: 'Picture creation needs a Gemini key (Settings → Brain → AI keys).' };
+    const others = aikeys.otherPictureKeys();          // 2.3.10: other keys whose model can make pictures (ticked "Pictures")
+    if (!keyList.length && !others.length) return { error: 'Picture creation needs a Gemini key, or another key whose model can make pictures with "Pictures" ticked (Settings → Brain → AI keys → tap Test on the key).' };
     const files = await import('../files.js');
     const { addMessage } = await import('../notify.js');
-    const parts = [];
+    let lastImg = null;
     if (use_last_image) {
       const f = get("SELECT f.* FROM files f JOIN messages m ON m.id=f.message_id WHERE f.kind='image' AND m.chat_id=? ORDER BY f.created DESC LIMIT 1", ctx.chatId || 0);
       if (!f) return { error: 'No photo from the owner in this chat to work from.' };
       const inp = files.modelInput([f]);
-      for (const m of inp.media) parts.push({ inlineData: { mimeType: m.mime, data: m.data } });
+      lastImg = inp.media[0] ? { mime: inp.media[0].mime, data: inp.media[0].data } : null;
     }
-    parts.push({ text: String(prompt).slice(0, 4000) });
-    const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'] } });
-    let model = setting('image_model') || 'gemini-3.1-flash-image';
-    let r, j, usedKey = null;
-    for (let ki = 0; ki < keyList.length; ki++) {
-      const key = keyList[ki].key; usedKey = keyList[ki];
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          r = await fetch(`${gBase()}/v1beta/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body, signal: AbortSignal.timeout(180000) });
-        } catch (e) { return { error: 'Could not reach Google for the picture: ' + e.message }; }
-        j = await r.json().catch(() => ({}));
-        if (r.status === 404 && attempt === 0) {
-          const names = await imageModels(key);
-          const pick = names.find(n => /flash-image/.test(n) && !/lite/.test(n)) || names.find(n => /flash.*image/.test(n)) || names[0];
-          if (pick && pick !== model) { log('image model', model, 'not found; using', pick); model = pick; continue; }
+    // The picture is shown in the chat, saved and logged the same way whichever key made it.
+    const finish = (usedKey, model, mimeIn, buf, words, why) => {
+      if (usedKey) audit('assistant', 'brain.route', `Pictures${ctx.jobId ? ' (job ' + ctx.jobId + ')' : ''}: '${usedKey.name}'${why || ''}`);
+      const mime = mimeIn === 'image/jpeg' ? 'image/jpeg' : mimeIn === 'image/webp' ? 'image/webp' : 'image/png';
+      const msgId = addMessage('assistant', 'web', '🎨 ' + String(prompt).slice(0, 300), { generated: 'image' }, ctx.jobId || null, ctx.chatId || null);
+      const file = files.saveGenerated(buf, mime, 'picture-' + Date.now() + (mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : '.jpg'), ctx.chatId, msgId);
+      return { ok: true, shown_to_owner_in_chat: true, file_id: file.id, download: cfg.publicUrl + '/api/files/' + file.id + '?download=1', model, model_note: String(words || '').slice(0, 300) || undefined,
+        note: 'The picture is already in the chat. Do not paste the link unless the owner asks; just say it is ready.' };
+    };
+    let geminiError = '';
+    if (keyList.length) {
+      const parts = [];
+      if (lastImg) parts.push({ inlineData: { mimeType: lastImg.mime, data: lastImg.data } });
+      parts.push({ text: String(prompt).slice(0, 4000) });
+      const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'] } });
+      let model = setting('image_model') || 'gemini-3.1-flash-image';
+      let r, j, usedKey = null, netErr = '';
+      for (let ki = 0; ki < keyList.length; ki++) {
+        const key = keyList[ki].key; usedKey = keyList[ki];
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            r = await fetch(`${gBase()}/v1beta/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body, signal: AbortSignal.timeout(180000) });
+          } catch (e) { netErr = 'Could not reach Google for the picture: ' + e.message; break; }
+          j = await r.json().catch(() => ({}));
+          if (r.status === 404 && attempt === 0) {
+            const names = await imageModels(key);
+            const pick = names.find(n => /flash-image/.test(n) && !/lite/.test(n)) || names.find(n => /flash.*image/.test(n)) || names[0];
+            if (pick && pick !== model) { log('image model', model, 'not found; using', pick); model = pick; continue; }
+          }
+          if (r.status === 429 && attempt === 0 && !/limit: 0|quota/i.test(j.error?.message || '')) { await sleep(cfg.testMode ? 50 : 8000); continue; }
+          break;
         }
-        if (r.status === 429 && attempt === 0 && !/limit: 0|quota/i.test(j.error?.message || '')) { await sleep(cfg.testMode ? 50 : 8000); continue; }
+        if (netErr) break;
+        // 2.3: this key hit its limit or was refused → try the next Gemini key
+        const keyProblem = r.status === 429 || r.status === 401 || r.status === 403 || /API_KEY_INVALID|API key not valid/i.test(JSON.stringify(j));
+        // (a 429 here is the picture model's own limit, not the chat model's, so only a refused key is marked)
+        if (keyProblem && r.status !== 429 && keyList[ki].id) aikeys.markFail(keyList[ki].id, aikeys.classify({ status: r.status, text: JSON.stringify(j), headers: r.headers, provider: 'gemini' }));
+        if (keyProblem && ki < keyList.length - 1) { log('picture: key', keyList[ki].name, 'failed (' + r.status + '); trying', keyList[ki + 1].name); continue; }
         break;
       }
-      // 2.3: this key hit its limit or was refused → try the next Gemini key
-      const keyProblem = r.status === 429 || r.status === 401 || r.status === 403 || /API_KEY_INVALID|API key not valid/i.test(JSON.stringify(j));
-      // (a 429 here is the picture model's own limit, not the chat model's, so only a refused key is marked)
-      if (keyProblem && r.status !== 429 && keyList[ki].id) aikeys.markFail(keyList[ki].id, aikeys.classify({ status: r.status, text: JSON.stringify(j), headers: r.headers, provider: 'gemini' }));
-      if (keyProblem && ki < keyList.length - 1) { log('picture: key', keyList[ki].name, 'failed (' + r.status + '); trying', keyList[ki + 1].name); continue; }
-      break;
+      if (netErr) geminiError = netErr;
+      else if (!r.ok) geminiError = friendly(r.status, redact(j.error?.message || ''));
+      else {
+        const out = (j.candidates?.[0]?.content?.parts || []);
+        const img = out.find(p => p.inlineData && /^image\//.test(p.inlineData.mimeType || ''));
+        const words = out.filter(p => p.text && !p.thought).map(p => p.text).join(' ').trim();
+        if (img) return finish(usedKey, model, img.inlineData.mimeType, Buffer.from(img.inlineData.data, 'base64'), words, usedKey.tagged === false ? ' — no key is set to "Pictures", so another Gemini key made it' : '');
+        geminiError = 'The image model answered without a picture' + (words ? ': ' + words.slice(0, 300) : (j.promptFeedback?.blockReason ? ' (blocked: ' + j.promptFeedback.blockReason + ')' : '.'));
+      }
+      if (!others.length) return { error: geminiError };
+      log('picture: Gemini did not make it; trying', others[0].name);
     }
-    if (!r.ok) return { error: friendly(r.status, redact(j.error?.message || '')) };
-    if (usedKey) audit('assistant', 'brain.route', `Pictures${ctx.jobId ? ' (job ' + ctx.jobId + ')' : ''}: '${usedKey.name}'${usedKey.tagged === false ? ' — no key is set to "Pictures", so another Gemini key made it' : ''}`);
-    const out = (j.candidates?.[0]?.content?.parts || []);
-    const img = out.find(p => p.inlineData && /^image\//.test(p.inlineData.mimeType || ''));
-    const words = out.filter(p => p.text && !p.thought).map(p => p.text).join(' ').trim();
-    if (!img) return { error: 'The image model answered without a picture' + (words ? ': ' + words.slice(0, 300) : (j.promptFeedback?.blockReason ? ' (blocked: ' + j.promptFeedback.blockReason + ')' : '.')) };
-    const mime = img.inlineData.mimeType === 'image/jpeg' ? 'image/jpeg' : img.inlineData.mimeType === 'image/webp' ? 'image/webp' : 'image/png';
-    const buf = Buffer.from(img.inlineData.data, 'base64');
-    const msgId = addMessage('assistant', 'web', '🎨 ' + String(prompt).slice(0, 300), { generated: 'image' }, ctx.jobId || null, ctx.chatId || null);
-    const file = files.saveGenerated(buf, mime, 'picture-' + Date.now() + (mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : '.jpg'), ctx.chatId, msgId);
-    return { ok: true, shown_to_owner_in_chat: true, file_id: file.id, download: cfg.publicUrl + '/api/files/' + file.id + '?download=1', model, model_note: words.slice(0, 300) || undefined,
-      note: 'The picture is already in the chat. Do not paste the link unless the owner asks; just say it is ready.' };
+    // 2.3.10: the other keys set to "Pictures", in his order
+    const { generateOpenAI } = await import('../pictures.js');
+    const errs = [];
+    for (const k of others) {
+      try {
+        const g = await generateOpenAI(k, k.key, { prompt: String(prompt).slice(0, 4000), image: lastImg, timeoutMs: cfg.testMode ? 15000 : 180000 });
+        return finish(k, k.model, g.mime, g.buf, g.words, geminiError ? ' (Gemini could not: ' + geminiError.slice(0, 120) + ')' : '');
+      } catch (e) {
+        const msg = redact(String(e.message || e)).split(k.key || '\u0000').join('[hidden]');
+        errs.push(`"${k.name}" (${k.model}): ${msg}`);
+        log('picture: key', k.name, 'failed:', msg.slice(0, 200));
+        if (e.keyProblem && k.id) aikeys.markFail(k.id, aikeys.classify({ status: e.status, text: e.text || '', provider: 'openai' }));
+      }
+    }
+    return { error: [geminiError, errs.length ? 'Picture creation failed with ' + errs.join('; ') : ''].filter(Boolean).join(' Then: ') };
   },
 };
 
