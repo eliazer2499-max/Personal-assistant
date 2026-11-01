@@ -1,1 +1,1 @@
-{"version": "2.3.12", "date": "2026-11-01", "notes": "Pictures: your assistant now picks the best Cloudflare model by itself and switches if one fails or the free amount runs low (choose Auto on the key)."}
+{"version": "2.3.13", "date": "2026-11-01", "notes": "New: your Cloudflare key can also chat (tick Chat on the key). It's a free backup when Gemini's limit runs out."}

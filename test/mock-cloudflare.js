@@ -30,7 +30,16 @@ export const MODELS = ['@cf/black-forest-labs/flux-1-schnell', '@cf/bytedance/st
 
 // 2.3.12: opts.models = the account's picture models (default MODELS); FAIL[model] = how that model fails right now:
 // 'down' (500), 'bad' (400 bad input), 'gone' (5007 no such model), 'busy' (3040 capacity), 'quota' (3036 for the whole key)
+// 2.3.13: chat models (Text Generation) and the OpenAI-compatible chat address /accounts/{id}/ai/v1/chat/completions.
+// Answers follow OpenAI's shape (choices[0].message, usage). CHAT.fail = 'quota' (3036) | 'busy' (3040) | 'down' (500);
+// CHAT.calls = every chat request (model, token, body). A message asking to "calculate" gets a calculator tool call first.
+export const TEXT_MODELS = [
+  { name: '@cf/openai/gpt-oss-120b', tools: true },
+  { name: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', tools: true },
+  { name: '@cf/meta/llama-3.1-8b-instruct', tools: false },
+];
 export async function startMockCloudflare(opts = {}) {
+  const CHAT = { calls: [], fail: null };
   const LIST = opts.models || MODELS;
   const FAIL = {};
   const SEEN = [];      // { path, token, body }
@@ -65,8 +74,29 @@ export async function startMockCloudflare(opts = {}) {
     if (!okAcct || token === TOK.noperm) return authErr();
     if (rest === 'ai/models/search') {
       const task = u.searchParams.get('task');
-      const all = [...LIST.map(n => ({ name: n, task: { name: 'Text-to-Image' } })), { name: '@cf/meta/llama-3.1-8b-instruct', task: { name: 'Text Generation' } }];
+      const all = [...LIST.map(n => ({ name: n, task: { name: 'Text-to-Image' } })),
+        ...TEXT_MODELS.map(x => ({ name: x.name, task: { name: 'Text Generation' }, properties: x.tools ? [{ property_id: 'function_calling', value: 'true' }] : [] }))];
       return J({ result: all.filter(x => !task || x.task.name === task) });
+    }
+    if (rest === 'ai/v1/chat/completions' && req.method === 'POST') {      // 2.3.13
+      let j = {}; try { j = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+      CHAT.calls.push({ model: j.model, token, body: j });
+      const raw = (o, s = 200) => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
+      if (token === TOK.quota || CHAT.fail === 'quota') return J({ success: false, errors: [{ code: 3036, message: 'AiError: You have used up your daily free allocation of 10,000 neurons.' }] }, 429);
+      if (CHAT.fail === 'busy') return J({ success: false, errors: [{ code: 3040, message: 'Capacity temporarily exceeded, please try again.' }] }, 429);
+      if (CHAT.fail === 'down') return J({ success: false, errors: [{ code: 3043, message: 'AiError: Internal server error' }] }, 500);
+      if (!TEXT_MODELS.some(x => x.name === j.model)) return J({ success: false, errors: [{ code: 5007, message: 'No such model ' + j.model + ' or task' }] }, 400);
+      if (!Array.isArray(j.messages) || !j.messages.length) return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: must have required property messages' }] }, 400);
+      const msgs = j.messages, last = msgs[msgs.length - 1];
+      const text = (c) => typeof c === 'string' ? c : Array.isArray(c) ? c.map(x => x.text || '').join(' ') : '';
+      const lastUser = [...msgs].reverse().find(x => x.role === 'user');
+      const usage = { prompt_tokens: 1000, completion_tokens: 50, total_tokens: 1050 };
+      const answer = (message) => raw({ id: 'chatcmpl-cf', object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: j.model, choices: [{ index: 0, message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }], usage });
+      if (last.role === 'tool') return answer({ role: 'assistant', content: 'Cloudflare chat here: the calculator says ' + text(last.content) });
+      if (Array.isArray(j.tools) && j.tools.length && /calculate/i.test(text(lastUser?.content)))
+        return answer({ role: 'assistant', content: null, tool_calls: [{ id: 'call_cf1', type: 'function', function: { name: 'calculator', arguments: JSON.stringify({ expression: '6*7' }) } }] });
+      if (j.max_tokens === 5) return answer({ role: 'assistant', content: 'Hi!' });
+      return answer({ role: 'assistant', content: 'Hello from Cloudflare chat (' + j.model + ').' });
     }
     const run = /^ai\/run\/(.+)$/.exec(rest);
     if (run && req.method === 'POST') {
@@ -95,5 +125,5 @@ export async function startMockCloudflare(opts = {}) {
   });
   await new Promise(r => srv.listen(0, '127.0.0.1', r));
   const url = 'http://127.0.0.1:' + srv.address().port + '/client/v4';
-  return { url, SEEN, FAIL, close: () => new Promise(r => srv.close(r)) };
+  return { url, SEEN, FAIL, CHAT, close: () => new Promise(r => srv.close(r)) };
 }

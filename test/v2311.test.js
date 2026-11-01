@@ -133,7 +133,9 @@ test('Test (unsaved Cloudflare key): token OK + Workers AI → picture models as
   assert.equal(r.j.saved, false);
   assert.deepEqual(r.j.use_for, ['pictures']);
   assert.equal(r.j.use_support.pictures.ok, true);
-  for (const u of ['chat', 'coding', 'media', 'background']) { assert.equal(r.j.use_support[u].ok, false); assert.equal(r.j.use_support[u].why, 'Cloudflare keys only make pictures'); }
+  // 2.3.13 (changed on purpose): Chat and Background jobs can be ticked now (not checked until he ticks them); coding/media stay greyed out
+  for (const u of ['coding', 'media']) { assert.equal(r.j.use_support[u].ok, false); assert.equal(r.j.use_support[u].why, 'Cloudflare keys do pictures, chat and background jobs'); }
+  for (const u of ['chat', 'background']) assert.equal(r.j.use_support[u].ok, null);
   assert.deepEqual(CF.SEEN.map(x => x.path), ['/user/tokens/verify', `/accounts/${ACCT}/ai/models/search`]);
   assert.match(CF.SEEN[1].query, /task=Text-to-Image/);
   assert.equal(cfRuns().length, 0, 'Test never makes a picture');
@@ -170,10 +172,12 @@ test('Add key: Cloudflare (pictures) is saved with its Account ID, used for Pict
   assert.equal(k.account_id, ACCT); assert.equal(k.base_url, '');
   assert.equal(k.model, cf.CF_DEFAULT_MODEL); assert.equal(k.effective_model, cf.CF_DEFAULT_MODEL);
   assert.deepEqual(k.use_for, ['pictures']); assert.equal(k.has_key, true);
-  assert.equal(k.use_support.chat.ok, false); assert.equal(k.use_support.pictures.ok, null);
+  assert.equal(k.use_support.chat.ok, null); assert.equal(k.use_support.coding.ok, false); assert.equal(k.use_support.pictures.ok, null);      // 2.3.13: chat can be ticked
   assert.ok(!r.text.includes(TOK.good));
-  // he can't tick chat on it
-  r = await call(`/api/brain/keys/${k.id}`, { use_for: ['chat', 'pictures'] });
+  // 2.3.13 (changed on purpose): he can tick Chat on it, but not Coding; back to Pictures only for the rest of this test
+  r = await call(`/api/brain/keys/${k.id}`, { use_for: ['chat', 'coding', 'pictures'] });
+  assert.deepEqual(r.j.key.use_for, ['chat', 'pictures']);
+  r = await call(`/api/brain/keys/${k.id}`, { use_for: ['pictures'] });
   assert.deepEqual(r.j.key.use_for, ['pictures']);
   // bad input is refused in plain words
   r = await call('/api/brain/keys', { name: 'x', kind: 'cloudflare', account_id: 'nope', key: TOK.good });
@@ -189,7 +193,7 @@ test('Add key: Cloudflare (pictures) is saved with its Account ID, used for Pict
   assert.equal(r.j.ok, true, r.text);
   assert.equal(r.j.key.use_support.pictures.ok, true);
   assert.equal(r.j.caps.pictures, true); assert.equal(r.j.caps.text, false);
-  assert.match(r.j.caps_note, /Greyed out: Chat, Coding, Voice, photos & files, Background jobs/);
+  assert.match(r.j.caps_note, /Greyed out: Coding, Voice, photos & files\./);      // 2.3.13: Chat and Background jobs are not greyed out any more
   assert.match(db.get("SELECT detail FROM audit WHERE action='brain.key_tested' ORDER BY id DESC LIMIT 1").detail, /^Tested 'Cloudflare': .*pictures ✓/);
   assert.equal(cfRuns().length, 0);
   // a failing saved-key Test (token without Workers AI) marks the key with a plain problem

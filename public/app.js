@@ -668,7 +668,9 @@ function whoDoesWhat(keys) {
     const hears = (k) => k.use_support?.media?.ok === true || (k.kind === 'gemini' && can(k));
     // 2.3.10: pictures = Gemini keys, or another key he ticked "Pictures" on whose Test said its model can
     // 2.3.11: a Cloudflare (pictures) key ticked Pictures counts unless its last Test failed
-    const pool = (u === 'pictures' ? keys.filter(k => k.kind === 'gemini' || (k.use_for.includes('pictures') && (k.use_support?.pictures?.ok === true || (k.kind === 'cloudflare' && k.use_support?.pictures?.ok !== false)))) : keys).filter(can);
+    // 2.3.13: a Cloudflare key only chats when Chat or Background jobs is ticked on it
+    const cfChats = (k) => k.kind !== 'cloudflare' || k.use_for.includes('chat') || k.use_for.includes('background');
+    const pool = (u === 'pictures' ? keys.filter(k => k.kind === 'gemini' || (k.use_for.includes('pictures') && (k.use_support?.pictures?.ok === true || (k.kind === 'cloudflare' && k.use_support?.pictures?.ok !== false)))) : keys.filter(cfChats)).filter(can);
     const tagged = (u === 'media' ? pool.find(k => free(k) && k.use_for.includes(u) && hears(k)) : null) || pool.find(k => free(k) && k.use_for.includes(u));
     const any = tagged || (u === 'media' ? pool.find(k => free(k) && hears(k)) : null) || pool.find(k => free(k));
     return [u, any, !!tagged];
@@ -739,7 +741,7 @@ async function brainView(body) {
     back.append(sheet); document.body.append(back); document.body.classList.add('noscroll');
     const o = msgEl(), to = msgEl();
     const kname = h('input', { 'data-f': 'name', value: k ? k.name : '', placeholder: 'e.g. Gemini – project 2 (abish@…)' });
-    const kind = h('select', { 'data-f': 'kind' }, h('option', { value: 'gemini' }, 'Gemini (Google)'), h('option', { value: 'groq' }, 'Groq (free, OpenAI-compatible)'), h('option', { value: 'openai' }, 'Other OpenAI-compatible'), h('option', { value: 'cloudflare' }, 'Cloudflare (pictures)'));
+    const kind = h('select', { 'data-f': 'kind' }, h('option', { value: 'gemini' }, 'Gemini (Google)'), h('option', { value: 'groq' }, 'Groq (free, OpenAI-compatible)'), h('option', { value: 'openai' }, 'Other OpenAI-compatible'), h('option', { value: 'cloudflare' }, 'Cloudflare (pictures, chat)'));      // 2.3.13: it can chat too
     kind.value = k ? (k.kind === 'openai' && k.base_url === K.groq.base_url ? 'groq' : k.kind) : 'gemini';
     const base = h('input', { 'data-f': 'base', value: k ? k.base_url : '', placeholder: 'https://…/v1', autocapitalize: 'off', spellcheck: 'false' });
     const kmodel = h('input', { 'data-f': 'model', value: k ? k.model : '', autocapitalize: 'off', spellcheck: 'false' });
@@ -760,6 +762,21 @@ async function brainView(body) {
         k && k.kind === 'cloudflare' && k.free_today ? h('p', { class: 'fine cffree', 'data-cffree': k.id }, k.free_today.text) : null);
     };
     kmodel.addEventListener('input', () => { if (kind.value === 'cloudflare') paintAuto(); });
+    // 2.3.13: Cloudflare can also chat (a free backup brain). Its own chat model; Test lists the account's chat models.
+    const CF_CHAT = (k && k.chat_default) || K.cf_chat_default || '@cf/openai/gpt-oss-120b';
+    const CF_CHAT_HELP = 'Chat uses the same free daily amount as pictures. Weaker than Gemini; good as a backup.';
+    const kchat = h('input', { 'data-f': 'chat_model', value: k && k.kind === 'cloudflare' ? (k.chat_model || '') : '', placeholder: CF_CHAT, autocapitalize: 'off', spellcheck: 'false' });
+    const chatChips = h('div', { class: 'kmodelswrap', 'data-chatmodels': '1' });
+    let chatList = [];
+    const chatNow = () => kchat.value.trim() || CF_CHAT;
+    const showChatModels = (list) => {
+      chatList = list || [];
+      chatChips.replaceChildren(...(chatList.length ? [h('p', { class: 'fine' }, 'Chat models on your Cloudflare account — tap one to choose it:'),
+        h('div', { class: 'kmodels' }, chatList.slice(0, 30).map(m => h('button', { type: 'button', class: 'chip' + (m === chatNow() ? ' on' : ''), 'data-chatmodel': m, onclick: () => pickChat(m) }, (m === CF_CHAT ? '⭐ ' : '') + m)))]
+        : [h('p', { class: 'fine', 'data-chathint': '1' }, 'Tick Chat below, then tap Test: it checks chat with one tiny message and lists your chat models.')]));
+    };
+    const chatWrap = h('div', { 'data-cfchat': '1' }, h('label', {}, 'Chat model'), kchat, h('p', { class: 'fine', 'data-chathelp': '1' }, CF_CHAT_HELP), chatChips);
+    kchat.addEventListener('input', () => showChatModels(chatList));
     const act1 = h('input', { type: 'checkbox', 'data-f': 'active', 'data-active': k ? k.id : 'new', id: 'kactive' }); act1.checked = k ? k.active : true;
     if (k) act1.onchange = async () => { try { const x = await api(`/api/brain/keys/${k.id}`, { active: act1.checked }); k = x.key; paintKeys({ ...K, keys: x.keys }); say(o, act1.checked ? 'Switched on.' : 'Switched off.', true); } catch (e) { say(o, e.message); act1.checked = !act1.checked; } };
     const baseWrap = h('div', {}, h('label', {}, 'API base URL'), base);
@@ -775,7 +792,7 @@ async function brainView(body) {
     // 2.3.9: a Test of the typed (unsaved) values counts while the type, address and model are still the ones tested.
     let draft = null;
     const kindOf = (v) => v === 'gemini' ? 'gemini' : v === 'cloudflare' ? 'cloudflare' : 'openai';
-    const setupSig = () => [kindOf(kind.value), kind.value === 'gemini' ? '' : kind.value === 'cloudflare' ? acct.value.trim().toLowerCase() : (kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value).trim().replace(/\/+$/, ''), kmodel.value.trim()].join('|');
+    const setupSig = () => [kindOf(kind.value), kind.value === 'gemini' ? '' : kind.value === 'cloudflare' ? acct.value.trim().toLowerCase() : (kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value).trim().replace(/\/+$/, ''), kmodel.value.trim(), kind.value === 'cloudflare' ? chatNow() : ''].join('|');
     const applySupport = () => {
       const v = kind.value, kindNow = kindOf(v);
       if (draft && draft.sig === setupSig() && draft.use_support) {
@@ -791,7 +808,7 @@ async function brainView(body) {
       const sup = sameSetup && k.use_support ? k.use_support : Object.fromEntries(USE_ORDER.map(u => [u, { ok: null, why: '' }]));
       // 2.3.10: any model that can make pictures; the server's answer (after a Test) says if this one can
       if (kindNow === 'openai' && !(sameSetup && k.use_support)) sup.pictures = { ok: false, why: 'Tap Test to check if this model can make pictures' };
-      if (kindNow === 'cloudflare' && !(sameSetup && k.use_support)) { for (const u of USE_ORDER) sup[u] = { ok: false, why: 'Cloudflare keys only make pictures' }; sup.pictures = { ok: null, why: '' }; }
+      if (kindNow === 'cloudflare' && !(sameSetup && k.use_support)) { for (const u of USE_ORDER) sup[u] = { ok: false, why: 'Cloudflare keys do pictures, chat and background jobs' }; sup.pictures = { ok: null, why: '' }; sup.chat = { ok: null, why: '' }; sup.background = { ok: null, why: '' }; }      // 2.3.13
       for (const u of USE_ORDER) {
         const s = sup[u] || { ok: null, why: '' };
         useBoxes[u].disabled = s.ok === false; if (s.ok === false) useBoxes[u].checked = false;
@@ -804,7 +821,7 @@ async function brainView(body) {
     const setUses = (list) => USE_ORDER.forEach(u => { useBoxes[u].checked = list.includes(u); });
     setUses(k ? k.use_for : defaultsFor('gemini'));
     const sync = (fromUser) => {
-      const v = kind.value; baseWrap.hidden = v !== 'openai'; acctWrap.hidden = v !== 'cloudflare';
+      const v = kind.value; baseWrap.hidden = v !== 'openai'; acctWrap.hidden = v !== 'cloudflare'; chatWrap.hidden = v !== 'cloudflare';
       keyLabel.textContent = v === 'cloudflare' ? 'API token' : 'Key';
       if (!(k && k.has_key)) kkey.placeholder = v === 'cloudflare' ? 'paste the API token' : 'paste the key';
       if (v === 'cloudflare' && fromUser && (!kmodel.value || isNew || (k && k.kind !== 'cloudflare'))) kmodel.value = CF_AUTO;      // 2.3.12: Auto by default
@@ -830,6 +847,11 @@ async function brainView(body) {
       if (!isNew && !draftMode) { try { const x = await api(`/api/brain/keys/${k.id}`, { model: m }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); paintAuto(); say(to, m === CF_AUTO ? 'Auto is on: your assistant picks the model for each picture. Tap Test to check it.' : `Model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } }
       showModels(lastList);
     };
+    // 2.3.13: a chat-model chip fills the Chat model field (and saves it right away on a saved key)
+    const pickChat = async (m) => {
+      kchat.value = m === CF_CHAT ? '' : m; showChatModels(chatList);
+      if (!isNew && !draftMode) { try { const x = await api(`/api/brain/keys/${k.id}`, { chat_model: kchat.value }); k = x.key; K.keys = x.keys; paintKeys(K); applySupport(); say(to, `Chat model set to ${m}. Tap Test to check it.`, true); } catch (e) { say(to, e.message); } }
+    };
     let lastList = [];
     const showModels = (list) => {
       lastList = list || [];
@@ -837,9 +859,10 @@ async function brainView(body) {
         onclick: () => pickModel(m) }, m)))] : []));
     };
     if (k && testOut[k.id]) { say(to, testMsg(testOut[k.id]), testOut[k.id].ok); showModels(testOut[k.id].models); }
+    showChatModels(k && testOut[k.id]?.chat_models || []);
     const body = () => {
       const b = { name: kname.value, kind: kindOf(kind.value), model: kmodel.value, active: act1.checked, use_for: USE_ORDER.filter(u => useBoxes[u].checked) };
-      if (kind.value === 'cloudflare') b.account_id = acct.value.trim();
+      if (kind.value === 'cloudflare') { b.account_id = acct.value.trim(); b.chat_model = kchat.value.trim(); }      // 2.3.13
       else if (kind.value !== 'gemini') b.base_url = kind.value === 'groq' ? (base.value || K.groq.base_url) : base.value;
       if (kkey.value) b.key = kkey.value;
       return b;
@@ -850,16 +873,18 @@ async function brainView(body) {
     };
     // 2.3.9: Test works before saving. A new key, or an edited key whose typed values differ from the saved ones,
     // is tested as typed (an empty key field = the saved key) and nothing is saved.
-    const typedChanged = () => !k || !!kkey.value.trim() || setupSig() !== [k.kind, k.kind === 'openai' ? String(k.base_url || '').replace(/\/+$/, '') : k.kind === 'cloudflare' ? String(k.account_id || '') : '', String(k.model || '')].join('|');
+    const cfChatTicked = () => useBoxes.chat.checked || useBoxes.background.checked;
+    const typedChanged = () => !k || !!kkey.value.trim() || setupSig() !== [k.kind, k.kind === 'openai' ? String(k.base_url || '').replace(/\/+$/, '') : k.kind === 'cloudflare' ? String(k.account_id || '') : '', String(k.model || ''), k.kind === 'cloudflare' ? (k.chat_model || CF_CHAT) : ''].join('|')
+      || (k.kind === 'cloudflare' && cfChatTicked() !== (k.use_for.includes('chat') || k.use_for.includes('background')));      // 2.3.13: Chat just ticked → test the chat too
     const test = async (e) => {
       if (typedChanged()) {
-        const b = body(); const tb = { kind: b.kind, base_url: b.base_url, account_id: b.account_id, model: b.model, key: b.key, name: b.name, use_for: b.use_for };
+        const b = body(); const tb = { kind: b.kind, base_url: b.base_url, account_id: b.account_id, model: b.model, chat_model: b.chat_model, key: b.key, name: b.name, use_for: b.use_for };
         if (k) tb.id = k.id;
         const sig = setupSig();
         const msg = (r) => testMsg(r) + (r.ok ? `\nNot saved yet — tap ${isNew ? 'Add key' : 'Save'} to keep it.` : '');
         const x = await act(e.target, to, () => api('/api/brain/keys/test', tb), msg);
         if (x) {
-          say(to, msg(x), x.ok); draftMode = true; showModels(x.models);
+          say(to, msg(x), x.ok); draftMode = true; showModels(x.models); if (x.chat_models) showChatModels(x.chat_models);
           draft = x.caps ? { sig, caps: x.caps, use_support: x.use_support } : null;
           if (x.caps && x.use_for) setUses(x.use_for);
           applySupport();
@@ -869,7 +894,7 @@ async function brainView(body) {
       const x = await act(e.target, to, () => api(`/api/brain/keys/${k.id}/test`, {}), testMsg);
       if (x) {
         draftMode = false; draft = null;
-        testOut[k.id] = x; showModels(x.models);
+        testOut[k.id] = x; showModels(x.models); if (x.chat_models) showChatModels(x.chat_models);
         if (x.key) { k = x.key; if (x.caps) setUses(k.use_for); applySupport(); paintAuto(); }     // ticks what it can do, greys out the rest
         paintKeys();
       }
@@ -885,7 +910,7 @@ async function brainView(body) {
         h('label', {}, 'Name / description'), kname,
         h('label', {}, 'Type'), kind, help, baseWrap, acctWrap,
         h('label', {}, 'Model'), autoWrap, kmodel, models,
-        keyLabel, kkey,
+        keyLabel, kkey, chatWrap,
         h('label', {}, 'Use for'), capsWrap, usesWrap,
         h('p', { class: 'fine' }, 'The assistant picks this key for the jobs ticked here. If it is busy or out of limit, another key takes over.'),
         h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', 'data-save': '1', onclick: save }, isNew ? 'Add key' : 'Save'),

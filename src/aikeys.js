@@ -5,6 +5,7 @@
 import { cfg } from './config.js';
 import { db, all, get, run, now, setting, setSetting, secret, setSecret, hasSecret, audit, log, redact, DEFAULTS } from './db.js';
 import { cleanAccountId, cleanCfModel, CF_DEFAULT_MODEL, ACCOUNT_ID_HELP, CF_AUTO, CF_AUTO_LABEL, cfFreeToday, cfCachedModels, cfForgetKey } from './cloudflare.js';
+import { CF_CHAT_DEFAULT, CF_CHAT_HELP, CF_CHAT_USES, cleanCfChatModel } from './cfchat.js';
 
 export const GROQ_BASE = 'https://api.groq.com/openai/v1';
 export const GROQ_MODEL = 'openai/gpt-oss-120b';
@@ -19,6 +20,8 @@ export function defaultUses(kind) { return kind === 'gemini' ? ['chat', 'picture
 export const KIND_LABELS = { gemini: 'Gemini', openai: 'OpenAI-compatible', cloudflare: 'Cloudflare (pictures)' };
 export const kindLabel = (k) => KIND_LABELS[k] || 'OpenAI-compatible';
 export const CF_ONLY = 'Cloudflare keys only make pictures';
+// 2.3.13: a Cloudflare key can also chat (Chat, Background jobs) when he ticks it; it never does coding or voice/photos/files on purpose.
+export const CF_NOT = 'Cloudflare keys do pictures, chat and background jobs';
 export function usesOf(r) {
   if (!r) return [];
   if (r.use_for == null) return defaultUses(r.kind);
@@ -29,7 +32,7 @@ function cleanUses(v, kind) {
   const arr = Array.isArray(v) ? v : String(v).split(',');
   const bad = arr.map(String).filter(u => u && !USES.includes(u));
   if (bad.length) throw httpErr(400, 'Unknown "Use for" choice: ' + bad.join(', '));
-  if (kind === 'cloudflare') return arr.includes('pictures') ? ['pictures'] : [];    // 2.3.11: pictures only
+  if (kind === 'cloudflare') return USES.filter(u => (u === 'pictures' || CF_CHAT_USES.includes(u)) && arr.includes(u));    // 2.3.13: pictures, chat, background
   return USES.filter(u => arr.includes(u));       // stored in a fixed order
 }
 
@@ -45,6 +48,8 @@ function ensureTable() {
   }
   // 2.3.1 → 2.3.2: what each model can do (filled in by Test). Existing keys start untested and keep their ticks.
   if (!all('PRAGMA table_info(ai_keys)').some(c => c.name === 'caps')) db.exec('ALTER TABLE ai_keys ADD COLUMN caps TEXT');
+  // 2.3.12 → 2.3.13: a Cloudflare key's chat model (its picture model stays in "model"). Empty = the default chat model.
+  if (!all('PRAGMA table_info(ai_keys)').some(c => c.name === 'chat_model')) db.exec('ALTER TABLE ai_keys ADD COLUMN chat_model TEXT');
 }
 
 // ---------------- 2.3.2: what the model can do ("caps"), found by Test ----------------
@@ -54,6 +59,8 @@ export const CAPS = ['text', 'images', 'audio', 'pdf', 'pictures', 'tools'];
 export const CAP_LABELS = { text: 'Chat', images: 'Photos', audio: 'Voice', pdf: 'PDF', pictures: 'Pictures', tools: 'Tools' };
 const MEDIA_CAP = { image: 'images', audio: 'audio', pdf: 'pdf' };
 export function capsOf(r) { if (!r || !r.caps) return null; try { const c = JSON.parse(r.caps); return c && typeof c === 'object' ? c : null; } catch { return null; } }
+/** 2.3.13: a Cloudflare key's chat model (empty = the default). */
+export function cfChatModelOf(r) { return (r && r.chat_model) || CF_CHAT_DEFAULT; }
 function effModel(r) { return r.model || (r.kind === 'gemini' ? setting('model') || DEFAULTS.model : r.kind === 'cloudflare' ? CF_DEFAULT_MODEL : ''); }
 /** The caps only count while they were found for this key's current type, address and model, and the key was not replaced since. */
 export function freshCaps(r) {
@@ -68,9 +75,14 @@ const PIC_TEST = 'Tap Test to check if this model can make pictures';
 export function useSupport(r) {
   const c = freshCaps(r);
   const out = {};
-  if (r.kind === 'cloudflare') {      // 2.3.11: pictures only; the other jobs are greyed out
-    for (const u of USES) out[u] = { ok: false, why: CF_ONLY };
+  if (r.kind === 'cloudflare') {      // 2.3.11: pictures; 2.3.13: also Chat and Background jobs (he ticks them); coding and media greyed out
+    for (const u of USES) out[u] = { ok: false, why: CF_NOT };
     out.pictures = !c ? { ok: null, why: '' } : c.pictures === false ? { ok: false, why: String(c.why?.pictures || 'The last Test failed — fix it and tap Test') } : { ok: true, why: '' };
+    const sameChat = c && c.chat_model === cfChatModelOf(r);           // chat was checked for THIS chat model
+    const chat = sameChat && (c.text === true || c.text === false) ? c.text : null;
+    out.chat = { ok: chat, why: chat === false ? String(c.why?.text || 'The chat model did not answer — pick another and tap Test') : '' };
+    const tools = sameChat && c.tools === false ? false : null;
+    out.background = chat === false ? { ...out.chat } : tools === false ? { ok: false, why: 'This chat model can\'t use tools, so it can\'t do this' } : { ok: chat, why: '' };
     return out;
   }
   if (!c) {
@@ -117,6 +129,14 @@ export function buildCaps(r, found, old = null) {
   }
   if (r.kind === 'openai' && c.pictures === true && found.pictures === true) { c.pictures_via = found.pictures_via === 'chat' ? 'chat' : 'images'; if (found.pictures_guess) c.pictures_guess = true; }
   if (found.why) c.why = Object.fromEntries(Object.entries(found.why).map(([k, w]) => [k, redact(String(w)).slice(0, 160)]));
+  // 2.3.13: a Cloudflare key's chat answer belongs to one chat model. Not checked this time → keep the last answer for the same model.
+  if (r.kind === 'cloudflare') {
+    if (found.chat_model) c.chat_model = found.chat_model;
+    else if (old && old.chat_model && old.chat_model === cfChatModelOf(r)) {
+      c.chat_model = old.chat_model; c.text = old.text ?? null; c.tools = old.tools ?? null;
+      if (old.why?.text) c.why = { ...(c.why || {}), text: old.why.text };
+    }
+  }
   return c;
 }
 /** After a Test: tick every "Use for" the model can do, untick the ones it can't; leave the unknown ones as they were. */
@@ -133,6 +153,8 @@ export function applyTestedUses(id) {
  * models usually cost money): the box is only made available, and he ticks it himself.
  */
 export function nextUses(r, sup, cur) {
+  // 2.3.13: on a Cloudflare key Chat and Background jobs are never ticked by a Test; he ticks them (they use the free daily amount)
+  if (r.kind === 'cloudflare') return USES.filter(u => u === 'pictures' ? (sup[u].ok === true || (sup[u].ok === null && cur.includes(u))) : CF_CHAT_USES.includes(u) && cur.includes(u) && sup[u].ok !== false);
   return USES.filter(u => (sup[u].ok === true && (u !== 'pictures' || r.kind === 'gemini' || r.kind === 'cloudflare' || cur.includes(u))) || (sup[u].ok === null && cur.includes(u)));
 }
 /** Can this key take every kind of media in the request? false only when its (current) caps say no. */
@@ -164,8 +186,8 @@ export function ensureKeys() {
 
 function insertKey(k, value) {
   const pos = (get('SELECT MAX(position) AS p FROM ai_keys').p ?? 0) + 1;
-  const r = run('INSERT INTO ai_keys(name,kind,base_url,model,active,position,created,cool_until,use_for) VALUES(?,?,?,?,?,?,?,0,?)',
-    k.name, k.kind, k.base_url || '', k.model || '', k.active ? 1 : 0, pos, now(), (k.use_for || defaultUses(k.kind)).join(','));
+  const r = run('INSERT INTO ai_keys(name,kind,base_url,model,active,position,created,cool_until,use_for,chat_model) VALUES(?,?,?,?,?,?,?,0,?,?)',
+    k.name, k.kind, k.base_url || '', k.model || '', k.active ? 1 : 0, pos, now(), (k.use_for || defaultUses(k.kind)).join(','), k.chat_model || '');
   const id = Number(r.lastInsertRowid);
   if (value) setSecret(SEC(id), String(value).trim());
   return id;
@@ -190,6 +212,12 @@ function cleanBase(v) {
   if (!/^https?:\/\/[^\s/]+/i.test(s)) throw httpErr(400, 'API base URL must start with https:// (e.g. ' + GROQ_BASE + ')');
   return s.replace(/\/chat\/completions$/, '');
 }
+/** 2.3.13: a Cloudflare key's chat model. Empty = the default chat model (stored as ''). */
+function cleanChatModel(v) {
+  if (v === undefined || v === null || !String(v).trim() || String(v).trim() === CF_CHAT_DEFAULT) return '';
+  const m = cleanCfChatModel(v); if (!m) throw httpErr(400, 'Cloudflare chat models look like ' + CF_CHAT_DEFAULT + ' (tap Test to see the list)');
+  return m;
+}
 function cleanKind(v) { if (v === 'gemini' || v === 'openai' || v === 'cloudflare') return v; throw httpErr(400, 'Type must be Gemini, OpenAI-compatible or Cloudflare (pictures)'); }
 /** 2.3.11: a Cloudflare key keeps its Account ID (not a secret) in base_url. */
 function cleanAcct(b, fallback = '') {
@@ -212,14 +240,16 @@ export function publicKey(r) {
     effective_model: effModel(r),
     use_for: usesOf(r), caps: capsOf(r), caps_fresh: !!freshCaps(r), use_support: useSupport(r),
     in_use: String(r.id) === setting('ai_key_in_use'),
-    ...(r.kind === 'cloudflare' ? { auto: effModel(r) === CF_AUTO, model_label: effModel(r) === CF_AUTO ? CF_AUTO_LABEL : effModel(r), free_today: cfFreeToday(r.id, effModel(r), cfCachedModels(r.id)) } : {}) };      // 2.3.12
+    ...(r.kind === 'cloudflare' ? { auto: effModel(r) === CF_AUTO, model_label: effModel(r) === CF_AUTO ? CF_AUTO_LABEL : effModel(r), free_today: cfFreeToday(r.id, effModel(r), cfCachedModels(r.id)),
+      chat_model: r.chat_model || '', effective_chat_model: cfChatModelOf(r), chat_default: CF_CHAT_DEFAULT, chat_help: CF_CHAT_HELP } : {}) };      // 2.3.12, 2.3.13
 }
 export function listKeys() { return listRows().map(publicKey); }
 
 export function addKey(b) {
   ensureKeys();
   const kind = cleanKind(b.kind);
-  const k = { name: cleanName(b.name), kind, base_url: baseFor(kind, b), model: cleanModel(b.model, kind), active: b.active === undefined ? 1 : (b.active ? 1 : 0), use_for: cleanUses(b.use_for, kind) };
+  const k = { name: cleanName(b.name), kind, base_url: baseFor(kind, b), model: cleanModel(b.model, kind), active: b.active === undefined ? 1 : (b.active ? 1 : 0), use_for: cleanUses(b.use_for, kind),
+    chat_model: kind === 'cloudflare' ? cleanChatModel(b.chat_model) : '' };
   const value = String(b.key ?? '').trim();
   if (kind === 'gemini' && !value) throw httpErr(400, 'Paste the key (from aistudio.google.com/apikey)');
   if (kind === 'cloudflare' && !value) throw httpErr(400, 'Paste the API token (Cloudflare: My Profile → API Tokens → Create Token → "Workers AI" template)');
@@ -248,7 +278,8 @@ export function draftKey(b) {
   if (value.length > 1000 || /\s/.test(value)) throw httpErr(400, 'That doesn\'t look like a key. Paste just the key.');
   if (!value && r) { value = String(keyValue(r.id) || '').trim(); stored = !!value; }
   const name = String(b.name ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 80) || (r ? r.name : 'New key');
-  return { k: { id: null, name, kind, base_url, model, use_for: cleanUses(b.use_for, kind).join(',') }, key: value, stored };
+  const chat_model = kind === 'cloudflare' ? (String(b.chat_model ?? '').trim() ? (cleanCfChatModel(b.chat_model) || String(b.chat_model).trim().slice(0, 200)) : (b.chat_model === undefined && r ? r.chat_model || '' : '')) : '';
+  return { k: { id: null, name, kind, base_url, model, chat_model, use_for: cleanUses(b.use_for, kind).join(',') }, key: value, stored };
 }
 export function updateKey(id, b) {
   const r = keyRow(id); if (!r) throw httpErr(404, 'That key was removed');
@@ -258,18 +289,19 @@ export function updateKey(id, b) {
     : kind === 'cloudflare' ? cleanAcct(b, r.kind === 'cloudflare' ? r.base_url : '') : '';
   const model = b.model !== undefined ? cleanModel(b.model, kind) : (kind === 'cloudflare' && r.kind !== 'cloudflare' ? CF_DEFAULT_MODEL : r.model);
   const active = b.active !== undefined ? (b.active ? 1 : 0) : r.active;
+  const chatModel = kind !== 'cloudflare' ? '' : b.chat_model !== undefined ? cleanChatModel(b.chat_model) : (r.chat_model || '');     // 2.3.13
   let uses = b.use_for !== undefined ? cleanUses(b.use_for, kind) : usesOf(r);
   const keyReplaced = b.key !== undefined && !!String(b.key).trim();
   // 2.3.2: a job the last Test showed this model can't do is not kept (the screen greys it out too).
-  if (b.use_for !== undefined && !keyReplaced) { const sup = useSupport({ ...r, kind, base_url: base, model }); uses = uses.filter(u => sup[u].ok !== false); }
+  if (b.use_for !== undefined && !keyReplaced) { const sup = useSupport({ ...r, kind, base_url: base, model, chat_model: chatModel }); uses = uses.filter(u => sup[u].ok !== false); }
   const usesChanged = uses.join(',') !== usesOf(r).join(',');
-  const changedSetup = kind !== r.kind || base !== (r.base_url || '') || model !== r.model || (b.key !== undefined && String(b.key).trim());
-  run('UPDATE ai_keys SET name=?, kind=?, base_url=?, model=?, active=?, use_for=? WHERE id=?', name, kind, base, model, active, uses.join(','), r.id);
+  const changedSetup = kind !== r.kind || base !== (r.base_url || '') || model !== r.model || chatModel !== (r.chat_model || '') || (b.key !== undefined && String(b.key).trim());
+  run('UPDATE ai_keys SET name=?, kind=?, base_url=?, model=?, active=?, use_for=?, chat_model=? WHERE id=?', name, kind, base, model, active, uses.join(','), chatModel, r.id);
   if (b.key !== undefined && String(b.key).trim()) setSecret(SEC(r.id), String(b.key).trim());
   if (changedSetup) run('UPDATE ai_keys SET problem=NULL, cool_until=0 WHERE id=?', r.id);
   if (keyReplaced) { const c = capsOf(r); if (c) run('UPDATE ai_keys SET caps=? WHERE id=?', JSON.stringify({ ...c, stale: true }), r.id); }   // new key → Test again    // fixed it? try again right away
   const what = [b.name !== undefined && name !== r.name ? 'renamed' : '', active !== r.active ? (active ? 'switched on' : 'switched off') : '',
-    b.key !== undefined && String(b.key).trim() ? 'key replaced' : '', model !== r.model ? 'model ' + model : '',
+    b.key !== undefined && String(b.key).trim() ? 'key replaced' : '', model !== r.model ? 'model ' + model : '', chatModel !== (r.chat_model || '') ? 'chat model ' + (chatModel || CF_CHAT_DEFAULT) : '',
     usesChanged ? 'use for ' + (uses.map(u => USE_LABELS[u]).join(', ') || 'nothing') : ''].filter(Boolean).join(', ');
   audit('owner', 'brain.key_changed', `"${name}"${what ? ': ' + what : ''}`);
   return publicKey(keyRow(r.id));
@@ -393,7 +425,7 @@ export function markFail(id, c, { fromTest = false } = {}) {
  * carries a voice note, photo or PDF: Gemini keys first in both groups (they can hear and see).
  */
 export function usableKeys({ withMedia = false, use = null, mediaKinds = [] } = {}) {
-  const rows = listRows().filter(r => r.active && (r.kind === 'openai' || hasSecret(SEC(r.id))) && (r.kind !== 'cloudflare' || use === 'pictures'));   // 2.3.11: Cloudflare keys never chat
+  const rows = listRows().filter(r => r.active && (r.kind === 'openai' || hasSecret(SEC(r.id))) && (r.kind !== 'cloudflare' || use === 'pictures' || usesOf(r).some(u => CF_CHAT_USES.includes(u))));   // 2.3.11: Cloudflare keys make pictures; 2.3.13: and chat when he ticked Chat or Background jobs
   const groups = use ? [rows.filter(r => usesOf(r).includes(use)), rows.filter(r => !usesOf(r).includes(use))] : [rows];
   let out = [];
   if (withMedia) { for (const g of groups) out.push(...g.filter(r => r.kind === 'gemini')); for (const g of groups) out.push(...g.filter(r => r.kind !== 'gemini')); }
@@ -428,7 +460,7 @@ export function inUse() {
   return r ? { name: r.name, kind: kindLabel(r.kind), model: r.model || (r.kind === 'gemini' ? setting('model') : '') } : null;
 }
 export function statusSummary() {
-  return listKeys().map(k => ({ name: k.name, type: kindLabel(k.kind), model: k.effective_model, active: k.active, in_use: k.in_use,
+  return listKeys().map(k => ({ name: k.name, type: kindLabel(k.kind), model: k.effective_model, ...(k.kind === 'cloudflare' && k.use_for.some(u => CF_CHAT_USES.includes(u)) ? { chat_model: k.effective_chat_model } : {}), active: k.active, in_use: k.in_use,
     use_for: k.use_for.map(u => USE_LABELS[u]),
     can_do: k.caps_fresh ? capsLine(k.caps) : 'not tested yet (tap Test)',
     status: !k.active ? 'inactive' : k.resting_until ? 'resting until ' + k.resting_until_text : k.problem ? k.problem : k.last_ok ? 'working' : 'not used yet',

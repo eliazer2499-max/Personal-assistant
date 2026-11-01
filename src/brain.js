@@ -185,19 +185,39 @@ export function toOpenAIMessages(system, items, caps = null) {
   return msgs;
 }
 
-async function openaiCompat({ system, items, tools, noTools, base, model, key, caps }) {
+async function openaiCompat({ system, items, tools, noTools, base, model, key, caps, extraBody = null, onFail = null, onUsage = null }) {
   base = String(base || '').replace(/\/+$/, '');
   if (!model) throw keyFail({ kind: 'model', reason: 'no model name — tap Test and pick one', until: 0, problem: 'model not found' });
   const msgs = toOpenAIMessages(system, items, caps);
-  const body = { model, messages: msgs };
+  const body = { model, messages: msgs, ...(extraBody || {}) };
   if (tools?.length && !noTools) body.tools = tools.map(t => ({ type: 'function', function: t }));
   const r = await postOnce(base + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: 'Bearer ' + key } : {}) }, body: JSON.stringify(body) }, 'openai');
-  if (r.status === 400 && hasToolPictures(items)) { log('model', model, 'refused a tool picture; sending without it'); return openaiCompat({ system, items: withoutToolPictures(items), tools, noTools, base, model, key, caps }); }
-  if (!r.ok) throw await failFrom(r, 'openai');
+  if (r.status === 400 && hasToolPictures(items)) { log('model', model, 'refused a tool picture; sending without it'); return openaiCompat({ system, items: withoutToolPictures(items), tools, noTools, base, model, key, caps, extraBody, onFail, onUsage }); }
+  if (!r.ok) throw onFail ? onFail(r.status, await r.text().catch(() => '')) : await failFrom(r, 'openai');      // 2.3.13: Cloudflare reads its own errors
   const j = await r.json().catch(() => ({}));
+  if (onUsage) { try { onUsage(j.usage || null); } catch {} }
   const m = j.choices?.[0]?.message || {};
   const calls = (m.tool_calls || []).map(c => { let a = {}; try { a = JSON.parse(c.function.arguments || '{}'); } catch {} return { id: c.id, name: c.function.name, args: a }; });
   return { text: (m.content || '').trim(), calls };
+}
+
+/**
+ * 2.3.13: chat with his Cloudflare key (Workers AI's OpenAI-compatible Chat Completions, his free daily amount).
+ * Same messages and tools as any OpenAI-compatible key. Cloudflare's own errors decide the rest: out of today's free
+ * amount (429 / 3036) → the key rests until 00:00 UTC and the next key answers. The Neurons are added to the same
+ * daily estimate as the pictures (2.3.12's counter). The token only travels in the Authorization header.
+ */
+async function cfChat({ system, items, tools, noTools, key, k, caps }) {
+  const { cfChatBase, cfChatFail, chatNeurons, CF_CHAT_MAX_TOKENS } = await import('./cfchat.js');
+  const { cfAddUsage, cfMarkUsedUp, cleanAccountId } = await import('./cloudflare.js');
+  rememberSecret(key);
+  if (!key) throw keyFail({ kind: 'bad_key', reason: 'no API token saved — paste it and tap Save', until: 0, problem: 'bad key' });
+  if (!cleanAccountId(k.base_url)) throw keyFail({ kind: 'bad_key', reason: 'the Account ID is not right — fix it and tap Test', until: 0, problem: 'key not allowed' });
+  const model = aikeys.cfChatModelOf(k);
+  return openaiCompat({ system, items, tools, noTools, base: cfChatBase(k.base_url), model, key, caps,
+    extraBody: { max_tokens: CF_CHAT_MAX_TOKENS },          // Cloudflare's default is only 256 tokens
+    onFail: (status, text) => { const c = cfChatFail(status, text, key); if (c.perDay) cfMarkUsedUp(k.id); return keyFail(c); },
+    onUsage: (u) => cfAddUsage(k.id, chatNeurons(model, u || {})) });
 }
 
 let mockFn = null;
@@ -260,6 +280,7 @@ export async function callModel(args, opts = {}) {
         const caps = aikeys.freshCaps(k);      // 2.3.2: null for a key that was never tested → exactly like 2.3.1
         const resp = k.kind === 'gemini'
           ? await gemini({ ...args, key, model: k.model || setting('model'), caps })
+          : k.kind === 'cloudflare' ? await cfChat({ ...args, key, k, caps })          // 2.3.13
           : await openaiCompat({ ...args, key, base: k.base_url, model: k.model, caps });
         aikeys.markOk(k.id);
         if (String(k.id) !== prevInUse && reasons.size) {
@@ -326,7 +347,7 @@ async function probeCall(url, headers, body, provider) {
   if (['server', 'network'].includes(c.kind) || r.status === 401 || r.status === 403) return { ok: null, why: c.reason };
   return { ok: false, why: `refused (${r.status}${aikeys.providerMessage(text) ? ': ' + String(aikeys.providerMessage(text)).slice(0, 100) : ''})`, status: r.status, text };
 }
-export async function probeCaps(k, key, { model, allModels = null, modalities = null, picturesOnly = false } = {}) {
+export async function probeCaps(k, key, { model, allModels = null, modalities = null, picturesOnly = false, cfChat = null } = {}) {
   const found = { text: true, why: {} };
   const set = (cap, res) => { found[cap] = res.ok; if (res.ok !== true && res.why) found.why[cap] = res.why; };
   // 2.3.10: pictures for OpenAI-compatible keys — from the model list (or the model's name). No picture is made.
@@ -335,9 +356,16 @@ export async function probeCaps(k, key, { model, allModels = null, modalities = 
     set('pictures', { ok: d.ok, why: d.ok ? '' : d.why });
     if (d.ok) { found.pictures_via = d.via; if (d.guess) { found.pictures_guess = true; found.why.pictures = d.why; } }
   };
-  if (k.kind === 'cloudflare') {      // 2.3.11: Cloudflare keys only make pictures (checked by cfTest; no picture is made)
+  if (k.kind === 'cloudflare') {      // 2.3.11: pictures (checked by cfTest; no picture is made)
     for (const c of ['text', 'images', 'audio', 'pdf', 'tools']) set(c, { ok: false, why: aikeys.CF_ONLY });
     found.files_text = false; set('pictures', { ok: true });
+    if (cfChat && cfChat.chat) {      // 2.3.13: Chat/Background jobs ticked → Test made one tiny chat call ("hi", 5 tokens)
+      found.chat_model = cfChat.chat_model;
+      const ch = cfChat.chat;
+      set('text', ch.ok === true ? { ok: true } : { ok: ch.ok, why: ch.limit ? 'limit' : ch.why });
+      set('tools', ch.ok === true ? { ok: cfChat.chat_tools === false ? false : true, why: 'not listed as able to call tools' } : { ok: ch.ok, why: ch.limit ? 'limit' : ch.why });
+      for (const c of ['images', 'audio', 'pdf']) set(c, { ok: false, why: aikeys.CF_NOT });
+    }
     return found;
   }
   if (picturesOnly && k.kind !== 'gemini') {      // a picture-only model (no chat): nothing else to check
@@ -503,8 +531,17 @@ async function runKeyTest(k, key, h) {
         return { ...rest, cf_problem: problem };
       }
       h.onOk();
-      const tc = await h.caps(t.model, t.models);
-      return { ...t, ...tc };
+      // 2.3.13: Chat or Background jobs ticked → the account's chat models (chips) + one tiny chat call ("hi", max 5 tokens)
+      let chat = null;
+      if (aikeys.usesOf(k).some(u => u === 'chat' || u === 'background')) {
+        const { cfChatTest } = await import('./cfchat.js');
+        chat = await cfChatTest({ accountId: k.base_url, token: key, chatModel: aikeys.cfChatModelOf(k), testMode: cfg.testMode });
+        if (chat.neurons && k.id) (await import('./cloudflare.js')).cfAddUsage(k.id, chat.neurons);
+      }
+      const tc = await h.caps(t.model, t.models, chat ? { cfChat: chat } : {});
+      if (!chat) return { ...t, ...tc };
+      const { chat: _c, neurons: _n, ...cx } = chat;
+      return { ...t, ...tc, ...cx, message: t.message + ' ' + chat.chat_message };
     }
     if (k.kind === 'gemini') {
       if (!key) return { ok: false, message: h.noKey, models: [] };
@@ -732,7 +769,7 @@ async function runJob({ id, text, channel, meta, before, chatId, fileRows, paren
         lastRoute = route;
         audit('assistant', 'brain.route', `${aikeys.USE_LABELS[use] || use} (job ${id}): '${resp.keyName}'${resp.tagged ? '' : ' — no free key is set to "' + (aikeys.USE_LABELS[use] || use) + '", so another active key answered'}`);
       }
-      if (!mediaNoticed && resp.keyKind === 'openai') {
+      if (!mediaNoticed && resp.keyKind !== 'gemini') {      // 2.3.13: also a Cloudflare key
         mediaNoticed = true;
         addMessage('notice', 'web', `No Gemini key was free, so I used "${resp.keyName}". It can't hear voice notes or read PDFs, so I only passed on your words.`, null, id);
       }
