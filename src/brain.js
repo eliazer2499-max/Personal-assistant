@@ -4,6 +4,7 @@
 import { cfg } from './config.js';
 import { all, get, run, now, setting, secret, redact, log, audit } from './db.js';
 import { declarations, execTool, summarizeArgs } from './tools/index.js';
+import { browserGuide } from './tools/browser.js';
 import { addMessage, deliver } from './notify.js';
 import { chatById, mainChatId, autoTitle } from './chats.js';
 import { validateUnsent, claimFiles, filesOfMessage, modelInput, MAX_INLINE } from './files.js';
@@ -482,6 +483,7 @@ export function systemPrompt(channel) {
     '- Building: put each app/site in its own workspace project. Write files with file_write, build/test with run_command, then publish with publish_site (this server), github_publish or cloudflare_pages_publish. Give the owner the link.',
     '- Checking a site (2.3.6): after building or changing a site, take a phone-size site_screenshot and look at the picture. Fix obvious problems (sideways scrolling, tiny text, broken pictures, things on top of each other, cut-off buttons), take one more screenshot to check, then share it. At most 2 rounds of fixes; then tell the owner what is left.',
     '- Videos (2.3.6): for a video request, plan the scenes first (picture, a few words, seconds each), make or collect the pictures (image_generate, his photos, project files), then render with video_make. It checks the length and size with ffprobe and shows you 2 frames: look at them before sending. If the words are wrong or cut off, fix and render again (at most twice), then send it.',
+    ...browserGuide(),
     '- Servers: prefer read-only commands to look first; batch changes into one clear command for his approval.',
     '- Use memory_save when the owner tells you something worth keeping. Use tasks_add for reminders, schedule_job for repeating work.',
     '- Do not invent emails, events, files, or command output you did not get from a tool. If something fails, say what failed and what you will try next.',

@@ -328,3 +328,27 @@ body.noscroll{overflow:hidden}
 .siteitem .sitebtns button{white-space:nowrap}
 a.siteopen{display:inline-flex;align-items:center;min-height:36px;padding:6px 12px;font-size:14px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);text-decoration:none;color:var(--accent);white-space:nowrap}
 #sites .msg{margin:-6px 0 14px}
+
+/* 2.3.8: Settings → Browser & logins, and the live browser page */
+.bstatus{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px}
+.brow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.loginitem{flex-direction:column;align-items:stretch!important}
+.logintop{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.loginwho{min-width:0}.loginwho b{overflow-wrap:anywhere}
+.loginbtns{display:flex;gap:6px;flex-shrink:0}
+.reveal:empty{display:none}.reveal{margin-top:8px}
+.livepage{display:flex;flex-direction:column;gap:10px}
+.liveaskcard{margin:0;font-size:15px}
+.livescreen{position:relative;border:1px solid var(--line);border-radius:12px;overflow:auto;background:#000;max-height:62vh;-webkit-overflow-scrolling:touch}
+.livescreen .liveimg{display:block;width:100%;height:auto;cursor:pointer;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+.livescreen.zoom .liveimg{width:260%;max-width:none}
+.livescreen .liveempty{display:none;padding:28px 16px;color:var(--muted);text-align:center;background:var(--panel)}
+.livescreen.closed .liveimg{display:none}.livescreen.closed .liveempty{display:block}
+.livescreen:not(.closed) .liveimg:not([src]){min-height:200px}
+.tapdot{position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;border:3px solid var(--accent);background:rgba(56,215,245,.25);pointer-events:none;animation:tapdot .7s ease-out forwards}
+@keyframes tapdot{to{transform:scale(1.8);opacity:0}}
+.livewhere{margin-top:-4px;overflow-wrap:anywhere}
+.livekeys{display:flex;flex-wrap:wrap;gap:6px}
+.livekeys button{flex:1 1 auto;min-height:40px}
+.livetype{display:flex;gap:8px}.livetype input{flex:1;min-width:0}
+.livedone{width:100%;min-height:48px;font-size:17px}

@@ -1,4 +1,5 @@
 // My Assistant v2 web app (vanilla JS, no build step).
+import { browserSettingsView, liveView } from './browser-ui.js';   // 2.3.8
 const $root = document.getElementById('root');
 let CSRF = '', ME = null, pollTimer = null, lastMsgId = 0, PENDING = 0;
 
@@ -38,6 +39,7 @@ function copyBox(value, label) {
 }
 const ago = (t) => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? 'just now' : s < 3600 ? Math.round(s / 60) + ' min ago' : s < 86400 ? Math.round(s / 3600) + ' h ago' : new Date(t).toLocaleDateString(); };
 const fmt = (t) => t ? new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+const UI = { h, api, act, msgEl, say, fmt, ago, copyBox, shell };   // 2.3.8: helpers for browser-ui.js
 
 // ---------------- auth screens ----------------
 function setupView() {
@@ -582,7 +584,7 @@ function serversView() {
 const SETTINGS_GROUPS = [
   ['Assistant', [['brain', '🧠', 'Brain (AI keys)', 'AI keys, who does what, models, limits'], ['general', '⚙️', 'General', 'Name, time zone, morning summary, light/dark']]],
   ['Connections', [['channels', '💬', 'Channels', 'WhatsApp Agent, Telegram, email, text/SMS'], ['google', '📧', 'Google accounts', 'Gmail, Calendar, Drive, Docs, Sheets, Contacts'], ['#/more/vault', '🔑', 'Vault', 'Tokens for GitHub, Cloudflare and more']]],
-  ['Abilities', [['tools', '🧰', 'Tools', 'Turn abilities on or off']]],
+  ['Abilities', [['tools', '🧰', 'Tools', 'Turn abilities on or off'], ['browser', '🌐', 'Browser & logins', 'Browser actions, saved logins, live view']]],
   ['System', [['updates', '⬆️', 'Updates & backups', 'New version, update, backups'], ['security', '🛡️', 'Security', 'Password, 2-step sign-in, sessions'], ['#/more/audit', '📜', 'Activity log', 'What it did, and which key answered']]],
 ];
 const SETTINGS_MENU = SETTINGS_GROUPS.flatMap(([, items]) => items).filter(x => !x[0].startsWith('#')).map(([id, , t, s]) => [id, t, s]);
@@ -597,7 +599,7 @@ function settingsView(sub) {
           id === 'updates' && ME?.update_available ? h('span', { class: 'dot', 'aria-label': 'update ready' }) : null, h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')))))));
     return shell('settings', 'Settings', '', page);
   }
-  const views = { brain: brainView, general: generalView, google: googleView, channels: channelsView, tools: toolsView, updates: updatesView, security: securityView };
+  const views = { brain: brainView, general: generalView, google: googleView, channels: channelsView, tools: toolsView, updates: updatesView, security: securityView, browser: (b) => browserSettingsView(b, UI) };
   const body = h('div', { class: 'page' });
   (views[sub] || (() => {}))(body);
   return shell('settings', (SETTINGS_MENU.find(x => x[0] === sub) || [, 'Settings'])[1], '', body, { back: '#/settings' });
@@ -1146,7 +1148,7 @@ async function route() {
   if (hello.setup_needed) return $root.replaceChildren(setupView());
   if (!ME) { if (hello.logged_in) await loadMe(); if (!ME) return $root.replaceChildren(loginView()); }
   const [, top, sub] = (location.hash.split('?')[0] || '#/chat').split('/');
-  const v = { chat: () => chatView(parseInt(sub, 10) || 0), chats: chatsView, approvals: approvalsView, servers: serversView, settings: () => settingsView(sub), more: () => moreView(sub) }[top] || chatView;
+  const v = { chat: () => chatView(parseInt(sub, 10) || 0), chats: chatsView, approvals: approvalsView, servers: serversView, settings: () => settingsView(sub), more: () => moreView(sub), live: () => liveView(UI) }[top] || chatView;
   $root.replaceChildren(v());
 }
 window.addEventListener('hashchange', route);

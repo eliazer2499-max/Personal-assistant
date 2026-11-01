@@ -8,6 +8,7 @@ import { openDb, all, get, run, now, setting, setSetting, allSettings, secret, s
 import * as auth from './auth.js';
 import { startJob, cancelJob, recoverJobs, geminiModels, testKey } from './brain.js';
 import * as aikeys from './aikeys.js';
+import { registerBrowserRoutes } from './browser-web.js';
 import { addMessage } from './notify.js';
 import * as approvals from './approvals.js';
 import * as tools from './tools/index.js';
@@ -257,6 +258,8 @@ R('POST', /^\/api\/servers$/, (c) => {
 });
 R('POST', /^\/api\/servers\/(\d+)\/remove$/, (c) => { const s = get('SELECT name FROM servers WHERE id=?', c.m[1]); run('DELETE FROM servers WHERE id=?', c.m[1]); audit('owner', 'server.removed', s?.name); return { ok: true }; });
 R('POST', /^\/api\/servers\/(\d+)\/test$/, async (c) => { const s = get('SELECT * FROM servers WHERE id=?', c.m[1]); if (!s) throw auth.httpErr(404, 'No such server'); return sshExec(s, 'uname -a && uptime', 25); });
+
+registerBrowserRoutes(R);   // 2.3.8: Settings → Browser & logins, and the live browser page
 
 // platforms vault
 R('GET', /^\/api\/platforms$/, () => ({ platforms: all('SELECT id,name,kind,base_url,extra,added FROM platforms ORDER BY name').map(p => ({ ...p, token: '••••(saved)' })) }));

@@ -8,6 +8,8 @@ import sendfile from './sendfile.js';
 import reacts from './react.js';
 import sitecheck from './sitecheck.js';
 import video from './video.js';
+import browserTools from './browser.js';
+import { browserActionsOn } from '../browser-core.js';
 import { platformToken } from './workspace.js';
 import { setting, setSetting, audit, all, redact } from '../db.js';
 import { request } from '../approvals.js';
@@ -51,7 +53,7 @@ const messaging = [
     run: async () => (await import('../updates.js')).checkUpdate(true) },
 ];
 
-export const ALL = [...basic, ...google, ...workspace, ...ssh, ...platform, ...messaging, ...agents, ...sendfile, ...reacts, ...sitecheck, ...video];
+export const ALL = [...basic, ...google, ...workspace, ...ssh, ...platform, ...messaging, ...agents, ...sendfile, ...reacts, ...sitecheck, ...video, ...browserTools];
 const MAP = new Map(ALL.map(t => [t.name, t]));
 export function byName(n) { return MAP.get(n); }
 
@@ -61,7 +63,7 @@ export function setEnabled(name, on) {
   setSetting('tools_disabled', [...d].join(','));
   audit('owner', on ? 'tool.enabled' : 'tool.disabled', name);
 }
-export function enabledTools() { const d = disabledSet(); return ALL.filter(t => !d.has(t.name)); }
+export function enabledTools() { const d = disabledSet(); const web = browserActionsOn(); return ALL.filter(t => !d.has(t.name) && (web || !t.browserAction)); }   // 2.3.8: Browser actions off hides the browser tools
 export function toolList() { const d = disabledSet(); return ALL.map(t => ({ name: t.name, description: t.description, enabled: !d.has(t.name), approval: !!t.approval })); }
 
 /** Run a tool for the model. Approval-gated calls are filed, not run. */
@@ -89,6 +91,7 @@ export async function execTool(name, args, ctx) {
 export function summarizeArgs(a) {
   const o = {};
   for (const [k, v] of Object.entries(a || {})) o[k] = typeof v === 'string' && v.length > 160 ? v.slice(0, 160) + '…' : v;
+  if (a && a.secret) for (const k of ['text', 'value']) if (k in o) o[k] = '(hidden)';   // 2.3.8: browser_type secret=true never reaches Activity or the audit log
   return o;
 }
 

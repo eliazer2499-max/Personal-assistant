@@ -46,4 +46,4 @@ chmod -R a+rX "$DEST" 2>/dev/null || true
 ln -sf "$found" "$LINK"
 ver=$("$LINK" --headless --no-sandbox --version 2>/dev/null || true)
 echo "Browser ready: ${ver:-$found}"
-echo "Done. The assistant can now open your sites at phone size and look at them."
+echo "Done. The assistant can now open your sites at phone size and look at them, and use websites for you (Settings → Browser & logins)."

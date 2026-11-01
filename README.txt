@@ -81,6 +81,14 @@ WHAT IT DOES
   here, on Cloudflare Pages and on GitHub, each with a Delete button (it asks
   "Are you sure?" first). GitHub: "Turn off Pages" or "Delete repo", only for
   repos it published itself. In chat it asks for your YES first.
+  Uses websites for you (2.3.8, needs the browser command above): opens
+  pages, clicks, fills in forms, and signs up for accounts. Before it sends
+  a sign-up it asks "Sign up at <site> with <email>?". It reads the code from
+  your Gmail, makes a strong password and keeps it encrypted (Settings →
+  Browser & logins → Saved logins, Show / Delete), and can put a new API key
+  straight into Settings (after your YES). A robot check ("I'm not a robot"):
+  it sends you a link to a page that shows its browser live; tap there, then
+  reply "done". It never pays, never types card details or picks paid plans.
 - Memory, tasks with reminders, repeating jobs ("every morning check my
   servers"), and a morning summary to your chosen channel.
 - Approvals: one queue (web buttons, Telegram buttons, WhatsApp buttons, or
