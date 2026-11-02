@@ -4,6 +4,11 @@
 #   options: MA_IP=192.168.1.127 MA_GW=192.168.1.1 MA_PREFIX=24
 set -e
 [ "$(id -u)" -eq 0 ] || { echo "Please run with sudo"; exit 1; }
+if [ -f /etc/netplan/90-myassistant-fallback.yaml ]; then
+  echo "The cable + Wi-Fi fallback is installed; it already sets the address."
+  echo "To change it: curl -fsSL https://updates.personalassistance.soft-tech.net/net-fallback.sh | sudo MA_IP=${MA_IP:-192.168.1.127} bash"
+  exit 0
+fi
 IP="${MA_IP:-192.168.1.127}"; GW="${MA_GW:-192.168.1.1}"; PFX="${MA_PREFIX:-24}"
 IF=$(ip -o link show | awk -F': ' '$2 ~ /^en/ {print $2; exit}')
 [ -z "$IF" ] && IF=enp0s3
