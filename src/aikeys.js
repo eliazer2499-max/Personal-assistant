@@ -299,6 +299,7 @@ export function updateKey(id, b) {
   run('UPDATE ai_keys SET name=?, kind=?, base_url=?, model=?, active=?, use_for=?, chat_model=? WHERE id=?', name, kind, base, model, active, uses.join(','), chatModel, r.id);
   if (b.key !== undefined && String(b.key).trim()) setSecret(SEC(r.id), String(b.key).trim());
   if (changedSetup) run('UPDATE ai_keys SET problem=NULL, cool_until=0 WHERE id=?', r.id);
+  if (changedSetup) setSetting('ai_key_limit_' + r.id, '');      // 2.3.14: a new key / model / address → its size limit is learned again
   if (keyReplaced) { const c = capsOf(r); if (c) run('UPDATE ai_keys SET caps=? WHERE id=?', JSON.stringify({ ...c, stale: true }), r.id); }   // new key → Test again    // fixed it? try again right away
   const what = [b.name !== undefined && name !== r.name ? 'renamed' : '', active !== r.active ? (active ? 'switched on' : 'switched off') : '',
     b.key !== undefined && String(b.key).trim() ? 'key replaced' : '', model !== r.model ? 'model ' + model : '', chatModel !== (r.chat_model || '') ? 'chat model ' + (chatModel || CF_CHAT_DEFAULT) : '',
@@ -313,6 +314,7 @@ export function removeKey(id) {
   setSecret(SEC(r.id), '');
   if (String(r.id) === setting('ai_key_main_id')) { setSecret('gemini_api_key', ''); setSetting('ai_key_main_id', ''); }
   if (String(r.id) === setting('ai_key_in_use')) setSetting('ai_key_in_use', '');
+  setSetting('ai_key_limit_' + r.id, '');      // 2.3.14
   audit('owner', 'brain.key_removed', `"${r.name}"`);
   return { ok: true };
 }
@@ -375,16 +377,46 @@ export function providerMessage(text) {
 }
 const short = (s, n = 140) => { s = redact(String(s || '')).replace(/\s+/g, ' ').replace(/https?:\/\/\S+/g, '').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 
+// 2.3.14: words providers use when one request is too big for the key's per-minute token limit or the model's context.
+// Groq: 413 "Request too large for model `…` … on tokens per minute (TPM): Limit 8000, Requested 12583, please reduce your
+// message size and try again". OpenAI-style: 400 context_length_exceeded / "maximum context length is N tokens".
+// Gemini: 400 "The input token count (N) exceeds the maximum number of tokens allowed (M)". (A 429 that only says
+// "Limit 8000, Used 7900, Requested 300 … try again in 2s" is a normal per-minute limit, not this.)
+const TOO_LARGE = /request too large|reduce (?:your|the) (?:message|prompt|request|input)|context[_ ]length[_ ]exceeded|maximum context length|exceeds the maximum number of tokens|input token count|prompt is too long|too many (?:input )?tokens|payload too large|request entity too large/i;
+export function tooLarge(status, msg) {
+  msg = String(msg || '');
+  if (!(status === 413 || ((status === 400 || status === 429) && TOO_LARGE.test(msg)))) return null;
+  const num = (re) => { const m = re.exec(msg); return m ? parseInt(m[1], 10) : 0; };
+  const limit = num(/\bLimit[:\s]+(\d{3,})/i) || num(/maximum context length is (\d{3,})/i) || num(/maximum number of tokens allowed \((\d{3,})\)/i);
+  const requested = num(/\bRequested[:\s]+(\d{3,})/i) || num(/input token count \((\d{3,})\)/i) || num(/you requested (\d{3,})/i);
+  return { kind: 'too_large', reason: `request too large for this key's limit (${status || 413})` + (msg ? ': ' + short(msg, 90) : ''), until: 0, limit, requested };
+}
+
+/** 2.3.14: the request-size cap (tokens) for a key, or 0 for none: what a 413 taught us, else a known-small provider. */
+export const GROQ_FREE_TPM = 8000;          // Groq's free plan: 6,000–12,000 tokens per minute per model (8,000 for gpt-oss-120b)
+export function sizeCap(r) {
+  if (!r) return 0;
+  const learned = parseInt(setting('ai_key_limit_' + r.id) || '0', 10) || 0;
+  if (learned) return learned;
+  if (r.kind === 'openai' && /(^|\/\/|\.)groq\.com/i.test(String(r.base_url || ''))) return GROQ_FREE_TPM;
+  return 0;
+}
+export function learnSizeCap(id, limit) { if (limit >= 1000) setSetting('ai_key_limit_' + id, String(limit)); }
+
 /**
  * Turn a failed answer into a decision: what to tell the owner (short, human), whether the key
  * should rest and until when, and whether it is a set-up problem on that key.
- * kind: quota | bad_key | model | server | network | other
+ * kind: quota | bad_key | model | server | network | too_large | other
  */
 export function classify({ status = 0, text = '', headers = null, provider = 'gemini', networkError = '' }) {
   const t = now();
   const who = provider === 'gemini' ? 'Google' : 'Provider';
   if (networkError) return { kind: 'network', reason: `could not be reached (${short(networkError, 60)})`, until: t + 60000 };
   const msg = providerMessage(text);
+  // 2.3.14: "request too large" is about THIS request's size (a small per-minute token limit, e.g. a free Groq key, or
+  // the model's context), not about the key: the brain retries once on the same key with a smaller request.
+  const tl = tooLarge(status, msg);
+  if (tl) return tl;
   if (status === 429 || /RESOURCE_EXHAUSTED/.test(text) || (status >= 400 && /quota/i.test(msg) && status !== 404)) {
     const perDay = /PerDay|per[ _-]?day|daily|\bRPD\b|\bTPD\b|limit:\s*0\b/i.test(text);
     if (provider === 'gemini' && perDay) {
@@ -396,7 +428,6 @@ export function classify({ status = 0, text = '', headers = null, provider = 'ge
     const until = t + Math.min(Math.max(secs, 1), 24 * 3600) * 1000;
     return { kind: 'quota', reason: `${provider === 'gemini' ? 'Google free limit' : 'rate limit'} reached (429)${perDay ? ' for today' : ''} — ${secs > 90 ? 'until ~' + clock(until) : 'busy for ~' + Math.ceil(secs) + ' s'}`, until, perDay };
   }
-  if (status === 413) return { kind: 'other', reason: 'request too large for this key\'s limit (413)' + (msg ? ': ' + short(msg, 90) : ''), until: 0 };
   if (status === 401 || /API_KEY_INVALID|API key not valid|invalid[_ ]api[_ ]key|Incorrect API key|unregistered callers/i.test(text))
     return { kind: 'bad_key', reason: `bad key (${status || 401}) — paste a new one`, until: t + 30 * 60000, problem: 'bad key' };
   if (status === 403) return { kind: 'bad_key', reason: `key not allowed (403)${msg ? ': ' + short(msg, 90) : ''}`, until: t + 30 * 60000, problem: 'key not allowed' };

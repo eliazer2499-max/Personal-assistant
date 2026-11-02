@@ -49,6 +49,8 @@ const nextUtcMidnight = (t = Date.now()) => { const d = new Date(t); return Date
  */
 export function cfChatFail(status, text, token = '', t = Date.now()) {
   const e = cfErrors(text, token);
+  if (status === 413 || /too large|context window|maximum context|too many tokens|exceeds? the (?:model's )?(?:maximum|context)/i.test(e.msg))     // 2.3.14
+    return { kind: 'too_large', until: 0, limit: 0, requested: 0, reason: `request too large for Cloudflare's chat model (${status || 413})${e.msg ? ': ' + e.msg.slice(0, 90) : ''}` };
   if (isCfLimit(status, e.codes, e.msg)) {
     if (e.codes.includes(3036) || /daily free allocation|neurons/i.test(e.msg)) {
       const until = nextUtcMidnight(t);
@@ -62,7 +64,87 @@ export function cfChatFail(status, text, token = '', t = Date.now()) {
     return { kind: 'model', until: t + 10 * 60000, reason: 'Cloudflare chat model not found — tap Test and pick one from the list' };
   if (status >= 500) return { kind: 'server', until: t + 60000, reason: `Cloudflare is having trouble (${status})` };
   if (status === 408) return { kind: 'server', until: t + 60000, reason: 'Cloudflare timed out (408)' };
-  return { kind: 'other', until: 0, reason: `Cloudflare chat error ${status}${e.msg ? ': ' + e.msg.slice(0, 120) : ''}` };
+  // 2.3.14: "Bad input" (5006) = the request did not match the model's input schema; the brain tries once more in the
+  // plainest documented shape (only role + text content, no tools) before moving on.
+  const badInput = status === 400 && (e.codes.includes(5006) || /bad input|oneOf|type mismatch|required propert/i.test(e.msg));
+  return { kind: 'other', until: 0, ...(badInput ? { badInput: true } : {}), reason: `Cloudflare chat error ${status}${e.msg ? ': ' + e.msg.slice(0, 120) : ''}` };
+}
+
+// ---------------- 2.3.14: the request body Workers AI accepts ----------------
+// Checked Nov 2 2026 against the model's published input schema (cloudflare-docs src/content/workers-ai-models/
+// gpt-oss-120b.json; the same "Messages" shape is used by every Workers AI text model):
+//  - it is oneOf [ {prompt}, {messages, tools?, …}, {input} (Responses), {requests} ]; a body that fits none is refused
+//    with "oneOf at '/' not met, 0 matches: required properties at '/' are 'prompt', Type mismatch of '/messages/N/content'".
+//  - every message needs `role` (string) AND `content` (a string, or an array of {type, text}). OpenAI's
+//    {role:'assistant', content: null, tool_calls:[…]} (2.3.13 sent exactly that after a tool call) does NOT fit.
+//  - tools: [{type:'function', function:{name, description, parameters:{type, properties, required?}}}] where every
+//    property needs `type` (a string) and `description`.
+//  - tool results go back as {role:'tool', content:'<string>'} (Cloudflare's function-calling guide).
+// Pictures: the chat models used here read text only, so a picture becomes a short note.
+
+const textOf = (c) => typeof c === 'string' ? c : Array.isArray(c)
+  ? c.map(p => p && typeof p.text === 'string' ? p.text : p && (p.type === 'image_url' || p.image_url) ? '[a picture was attached here; this model can\'t see pictures]' : p && p.input_audio ? '[a voice clip was attached here; this model can\'t hear it]' : '').filter(Boolean).join('\n')
+  : c == null ? '' : String(c);
+const callLine = (c) => { const f = c.function || c; let a = f.arguments ?? f.args ?? {}; if (typeof a !== 'string') a = JSON.stringify(a); return `[I called the tool ${f.name} with ${a.length > 400 ? a.slice(0, 400) + '…' : a}]`; };
+
+/**
+ * OpenAI-style chat messages → messages that fit Workers AI's schema. tools=true keeps tool_calls / tool_call_id
+ * (Cloudflare's OpenAI-compatible endpoint reads them) with string content everywhere; tools=false is the plainest
+ * documented shape: system / user / assistant with string content only (a tool call and its answer become words).
+ */
+export function cfMessages(msgs, { tools = true } = {}) {
+  const out = [];
+  const callName = new Map();          // tool_call_id → tool name (OpenAI's tool messages carry only the id)
+  for (const m of Array.isArray(msgs) ? msgs : []) for (const c of m?.tool_calls || []) if (c?.id) callName.set(String(c.id), String(c.function?.name || ''));
+  for (const m of Array.isArray(msgs) ? msgs : []) {
+    const role = ['system', 'user', 'assistant', 'tool'].includes(m?.role) ? m.role : 'user';
+    let content = textOf(m?.content);
+    if (role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      if (tools) { out.push({ role, content, tool_calls: m.tool_calls.map(c => ({ id: String(c.id || ''), type: 'function', function: { name: String(c.function?.name || ''), arguments: typeof c.function?.arguments === 'string' ? c.function.arguments : JSON.stringify(c.function?.arguments || {}) } })) }); continue; }
+      content = [content, ...m.tool_calls.map(callLine)].filter(Boolean).join('\n');
+    }
+    if (role === 'tool') {
+      const name = m.name || callName.get(String(m.tool_call_id || '')) || '';
+      if (tools) { out.push({ role: 'tool', content: content || '(empty)', ...(m.tool_call_id ? { tool_call_id: String(m.tool_call_id) } : {}), ...(name ? { name: String(name) } : {}) }); continue; }
+      out.push({ role: 'user', content: `[Tool answer${name ? ' from ' + name : ''}]: ${content || '(empty)'}` });
+      continue;
+    }
+    if (!tools && role === 'system' && out.length) { out.push({ role: 'user', content: '[System note] ' + content }); continue; }
+    out.push({ role, content: content || (role === 'assistant' ? '' : '…') });
+  }
+  if (!tools) {      // plain chat: merge back-to-back messages of the same role (some chat templates want them to alternate)
+    const merged = [];
+    for (const m of out) { const last = merged[merged.length - 1]; if (last && last.role === m.role && m.role !== 'system') last.content = [last.content, m.content].filter(Boolean).join('\n\n'); else merged.push({ ...m }); }
+    return merged;
+  }
+  return out;
+}
+
+function cfProp(name, v) {
+  const o = v && typeof v === 'object' ? { ...v } : {};
+  if (typeof o.type !== 'string') o.type = Array.isArray(o.type) ? String(o.type.find(t => t !== 'null') || 'string') : o.enum ? 'string' : o.items ? 'array' : o.properties ? 'object' : 'string';
+  if (typeof o.description !== 'string' || !o.description.trim()) o.description = name.replace(/_/g, ' ');
+  delete o.anyOf; delete o.oneOf; delete o.nullable;
+  return o;
+}
+/** The app's tool declarations ({name, description, parameters}) → Workers AI tools (every property with type + description). */
+export function cfTools(decls) {
+  return (Array.isArray(decls) ? decls : []).filter(t => t && t.name).map(t => {
+    const p = t.parameters && typeof t.parameters === 'object' ? t.parameters : {};
+    const props = {};
+    for (const [k, v] of Object.entries(p.properties || {})) props[k] = cfProp(k, v);
+    const parameters = { type: 'object', properties: props };
+    const req = (Array.isArray(p.required) ? p.required : []).filter(k => k in props);
+    if (req.length) parameters.required = req;
+    return { type: 'function', function: { name: String(t.name), description: String(t.description || t.name).trim() || String(t.name), parameters } };
+  });
+}
+/** The whole chat body for Workers AI. tools=false (the model can't call tools, or the last try was refused as bad input) → plain chat. */
+export function cfChatBody({ model, messages, tools = null, maxTokens = CF_CHAT_MAX_TOKENS, plain = false }) {
+  const useTools = !plain && Array.isArray(tools) && tools.length > 0;
+  const body = { model, messages: cfMessages(messages, { tools: useTools }), max_tokens: maxTokens };
+  if (useTools) body.tools = cfTools(tools);
+  return body;
 }
 
 /** Text Generation models from a models/search answer; ones that can call tools first (when the list says so). */

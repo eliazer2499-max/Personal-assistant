@@ -1,1 +1,1 @@
-{"version": "2.3.13", "date": "2026-11-01", "notes": "New: your Cloudflare key can also chat (tick Chat on the key). It's a free backup when Gemini's limit runs out."}
+{"version": "2.3.14", "date": "2026-11-02", "notes": "Fixes 3 AI key errors: newer Gemini models no longer fail with \"missing a thought_signature\" when another key started the job; Cloudflare chat no longer fails with \"Bad input\" after a tool step; a key with a small limit (like free Groq) now gets a shorter request instead of \"request too large\"."}

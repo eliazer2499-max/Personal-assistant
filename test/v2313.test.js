@@ -89,7 +89,7 @@ test('version 2.3.13 is newer than 2.3.12 (numbers, not text)', () => {
   assert.equal(updates.cmpVer('2.3.13', '2.3.12'), 1);
   assert.equal(updates.cmpVer('2.3.12', '2.3.13'), -1);
   assert.equal(updates.cmpVer('2.3.13', '2.3.9'), 1);
-  assert.equal(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version, '2.3.13');
+  assert.ok(updates.cmpVer(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version, '2.3.13') >= 0);      // 2.3.14: newer is fine
 });
 
 test('a Cloudflare key: Chat and Background jobs can be ticked (start unticked), its own chat model, the help line', async () => {

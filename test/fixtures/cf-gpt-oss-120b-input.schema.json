@@ -1,0 +1,415 @@
+{
+ "oneOf": [
+  {
+   "type": "object",
+   "oneOf": [
+    {
+     "title": "Prompt",
+     "properties": {
+      "prompt": {
+       "type": "string",
+       "minLength": 1
+      },
+      "lora": {
+       "type": "string"
+      },
+      "response_format": {
+       "title": "JSON Mode",
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "json_object",
+          "json_schema"
+         ]
+        },
+        "json_schema": {}
+       }
+      },
+      "raw": {
+       "type": "boolean",
+       "default": false
+      },
+      "stream": {
+       "type": "boolean",
+       "default": false
+      },
+      "max_tokens": {
+       "type": "integer",
+       "default": 256
+      },
+      "temperature": {
+       "type": "number",
+       "default": 0.6,
+       "minimum": 0,
+       "maximum": 5
+      },
+      "top_p": {
+       "type": "number",
+       "minimum": 0.001,
+       "maximum": 1
+      },
+      "top_k": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 50
+      },
+      "seed": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 9999999999
+      },
+      "repetition_penalty": {
+       "type": "number",
+       "minimum": 0,
+       "maximum": 2
+      },
+      "frequency_penalty": {
+       "type": "number",
+       "minimum": -2,
+       "maximum": 2
+      },
+      "presence_penalty": {
+       "type": "number",
+       "minimum": -2,
+       "maximum": 2
+      }
+     },
+     "required": [
+      "prompt"
+     ]
+    },
+    {
+     "title": "Messages",
+     "properties": {
+      "messages": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "role": {
+          "type": "string"
+         },
+         "content": {
+          "oneOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "properties": {
+              "type": {
+               "type": "string"
+              },
+              "text": {
+               "type": "string"
+              }
+             }
+            }
+           }
+          ]
+         }
+        },
+        "required": [
+         "role",
+         "content"
+        ]
+       }
+      },
+      "functions": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "code": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "name",
+         "code"
+        ]
+       }
+      },
+      "tools": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "oneOf": [
+         {
+          "properties": {
+           "name": {
+            "type": "string"
+           },
+           "parameters": {
+            "type": "object",
+            "properties": {
+             "type": {
+              "type": "string"
+             },
+             "required": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "properties": {
+              "type": "object",
+              "additionalProperties": {
+               "type": "object",
+               "properties": {
+                "type": {
+                 "type": "string"
+                }
+               },
+               "required": [
+                "type",
+                "description"
+               ]
+              }
+             }
+            },
+            "required": [
+             "type",
+             "properties"
+            ]
+           }
+          },
+          "required": [
+           "name",
+           "description",
+           "parameters"
+          ]
+         },
+         {
+          "properties": {
+           "type": {
+            "type": "string"
+           },
+           "function": {
+            "type": "object",
+            "properties": {
+             "name": {
+              "type": "string"
+             },
+             "parameters": {
+              "type": "object",
+              "properties": {
+               "type": {
+                "type": "string"
+               },
+               "required": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "properties": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "object",
+                 "properties": {
+                  "type": {
+                   "type": "string"
+                  }
+                 },
+                 "required": [
+                  "type",
+                  "description"
+                 ]
+                }
+               }
+              },
+              "required": [
+               "type",
+               "properties"
+              ]
+             }
+            },
+            "required": [
+             "name",
+             "description",
+             "parameters"
+            ]
+           }
+          },
+          "required": [
+           "type",
+           "function"
+          ]
+         }
+        ]
+       }
+      },
+      "response_format": {
+       "title": "JSON Mode",
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "json_object",
+          "json_schema"
+         ]
+        },
+        "json_schema": {}
+       }
+      },
+      "raw": {
+       "type": "boolean",
+       "default": false
+      },
+      "stream": {
+       "type": "boolean",
+       "default": false
+      },
+      "max_tokens": {
+       "type": "integer",
+       "default": 256
+      },
+      "temperature": {
+       "type": "number",
+       "default": 0.6,
+       "minimum": 0,
+       "maximum": 5
+      },
+      "top_p": {
+       "type": "number",
+       "minimum": 0.001,
+       "maximum": 1
+      },
+      "top_k": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 50
+      },
+      "seed": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 9999999999
+      },
+      "repetition_penalty": {
+       "type": "number",
+       "minimum": 0,
+       "maximum": 2
+      },
+      "frequency_penalty": {
+       "type": "number",
+       "minimum": -2,
+       "maximum": 2
+      },
+      "presence_penalty": {
+       "type": "number",
+       "minimum": -2,
+       "maximum": 2
+      }
+     },
+     "required": [
+      "messages"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "object",
+   "title": "Responses",
+   "properties": {
+    "input": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "items": {},
+       "type": "array"
+      }
+     ]
+    },
+    "reasoning": {
+     "type": "object",
+     "properties": {
+      "effort": {
+       "type": "string",
+       "enum": [
+        "low",
+        "medium",
+        "high"
+       ],
+       "default": "medium"
+      },
+      "summary": {
+       "type": "string",
+       "enum": [
+        "auto",
+        "concise",
+        "detailed"
+       ]
+      }
+     }
+    }
+   },
+   "required": [
+    "input"
+   ]
+  },
+  {
+   "type": "object",
+   "title": "Responses_Async",
+   "properties": {
+    "requests": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "properties": {
+       "input": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "items": {},
+          "type": "array"
+         }
+        ]
+       },
+       "reasoning": {
+        "type": "object",
+        "properties": {
+         "effort": {
+          "type": "string",
+          "enum": [
+           "low",
+           "medium",
+           "high"
+          ],
+          "default": "medium"
+         },
+         "summary": {
+          "type": "string",
+          "enum": [
+           "auto",
+           "concise",
+           "detailed"
+          ]
+         }
+        }
+       }
+      },
+      "required": [
+       "input"
+      ]
+     }
+    }
+   },
+   "required": [
+    "requests"
+   ]
+  }
+ ]
+}

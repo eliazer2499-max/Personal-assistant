@@ -2,6 +2,11 @@
 // Shapes follow Cloudflare's docs (Nov 2026): every JSON answer is {success, errors:[{code,message}], messages, result}.
 import http from 'node:http';
 import zlib from 'node:zlib';
+import fs from 'node:fs';
+import { check } from './schema-check.js';
+// 2.3.14: chat requests are checked against the model's published input schema (as Cloudflare does), so a body Cloudflare
+// would refuse is refused here too, with Cloudflare's words (5006 "Bad input").
+export const CHAT_SCHEMA = JSON.parse(fs.readFileSync(new URL('./fixtures/cf-gpt-oss-120b-input.schema.json', import.meta.url), 'utf8'));
 
 export const ACCT = '0123456789abcdef0123456789abcdef';
 export const OTHER_ACCT = 'fedcba9876543210fedcba9876543210';
@@ -39,7 +44,7 @@ export const TEXT_MODELS = [
   { name: '@cf/meta/llama-3.1-8b-instruct', tools: false },
 ];
 export async function startMockCloudflare(opts = {}) {
-  const CHAT = { calls: [], fail: null };
+  const CHAT = { calls: [], fail: null, refused: [] };
   const LIST = opts.models || MODELS;
   const FAIL = {};
   const SEEN = [];      // { path, token, body }
@@ -87,6 +92,10 @@ export async function startMockCloudflare(opts = {}) {
       if (CHAT.fail === 'down') return J({ success: false, errors: [{ code: 3043, message: 'AiError: Internal server error' }] }, 500);
       if (!TEXT_MODELS.some(x => x.name === j.model)) return J({ success: false, errors: [{ code: 5007, message: 'No such model ' + j.model + ' or task' }] }, 400);
       if (!Array.isArray(j.messages) || !j.messages.length) return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: must have required property messages' }] }, 400);
+      const { model: _m, ...input } = j;
+      const bad = check(CHAT_SCHEMA, input);                                                        // 2.3.14
+      if (bad.length) { CHAT.refused.push(bad); return J({ success: false, errors: [{ code: 5006, message: 'AiError: Bad input: Error: ' + bad.join(', ') }] }, 400); }
+      if (CHAT.fail === 'badinput_tools' && Array.isArray(j.tools) && j.tools.length) { CHAT.refused.push(['tools']); return J({ success: false, errors: [{ code: 5006, message: "AiError: Bad input: Error: oneOf at '/' not met, 0 matches: required properties at '/' are 'prompt', Type mismatch of '/tools/0'" }] }, 400); }
       const msgs = j.messages, last = msgs[msgs.length - 1];
       const text = (c) => typeof c === 'string' ? c : Array.isArray(c) ? c.map(x => x.text || '').join(' ') : '';
       const lastUser = [...msgs].reverse().find(x => x.role === 'user');
