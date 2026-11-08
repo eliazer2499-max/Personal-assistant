@@ -148,7 +148,7 @@ test('the last guard: every channel (Telegram, WhatsApp number, SMS) sends only 
 test('prompt: no own "reply YES" before an approval tool, no second "approval is waiting" message; site edits need no YES', () => {
   const p = brain.systemPrompt('whatsapp_agent');
   assert.match(p, /do NOT ask "should I\?" or "reply YES and I'll…" before calling such a tool: just call it\. That request IS his confirmation/);
-  assert.match(p, /Do not send another message saying that an approval is waiting or repeating its code/);
+  assert.match(p, /Do not send another message saying that an approval is waiting, and never mention request codes/);   // 2.3.17
   assert.match(p, /writing or changing files in your own workspace projects, building, testing, screenshots\. Just do it/);
   assert.doesNotMatch(p, /Tell him the code and what is waiting/);
   assert.match(brain.systemPrompt('web', { hidden: true }), /answer in plain words \(never the replies JSON\)/);
@@ -216,12 +216,12 @@ test('WhatsApp Agent: approval text has no code when it is the only one; bare "Y
   M.mode = 'thumb'; db.setSetting('wa_agent_react_recent', '[]');
   const n2 = AP.sent.length;
   push({ id: 'wamid.Y1', from: 'user:4242', type: 'text', text: { body: 'Yes' } });
-  await until(() => AP.sent.slice(n2).some(s => s.type === 'text' && /^Done A\d+/.test(s.text.body)), 8000, 'done');
+  await until(() => AP.sent.slice(n2).some(s => s.type === 'text' && /^Done: /.test(s.text.body)), 8000, 'done');   // 2.3.17: no code
   await until(() => AP.sent.slice(n2).some(s => s.type === 'reaction' && s.reaction.message_id === 'wamid.Y1'), 8000, 'the 👍 on his Yes');
   await sleep(600);
   const out = AP.sent.slice(n2);
   assert.deepEqual(out.filter(s => s.type === 'reaction' && s.reaction.message_id === 'wamid.Y1').map(s => s.reaction.emoji), ['👍']);
-  assert.deepEqual(out.filter(s => s.type === 'text' && !/^Done A\d+/.test(s.text.body)), [], 'no 👍 text message, nothing else');
+  assert.deepEqual(out.filter(s => s.type === 'text' && !/^Done: /.test(s.text.body)), [], 'no 👍 text message, nothing else');
   assert.ok(!fs.existsSync(path.join(SITES, 'wa-site')));
 });
 
@@ -270,7 +270,7 @@ test('Telegram: YES by text → the 👍 after it goes on his YES message (setMe
   await telegram.processUpdate({ update_id: 9802, message: { message_id: 802, chat: { id: 777, type: 'private' }, text: 'YES' } });
   await until(() => F.calls.some(c => /setMessageReaction$/.test(c.path) && JSON.parse(c.body).message_id === 802), 8000, 'reaction on 802');
   await sleep(500);
-  assert.deepEqual(F.state.tgSent.map(x => x.text).filter(t => !/^Done A\d+/.test(t)), [], 'only the "Done" notice, no 👍 text');
+  assert.deepEqual(F.state.tgSent.map(x => x.text).filter(t => !/^Done: /.test(t)), [], 'only the "Done" notice, no 👍 text');
 });
 
 // ---------------------------------------------------------------- 5) approvals: no code for one, bare YES, replaced, expiry
@@ -278,7 +278,7 @@ test('approvals: the only one → no code in the text, bare YES approves it', as
   clearApprovals();
   const id = await approvals.request('gmail_send', { to: 'a@b.c', subject: 's', body: 'b' }, 'Send an email to a@b.c', { channel: 'web' });
   const txt = db.get("SELECT text FROM messages WHERE role='approval' AND json_extract(meta,'$.approval')=? ", id).text;
-  assert.match(txt, /^Needs your OK \(A\d+\):/); assert.match(txt, /Reply YES to approve, or NO\. Expires in 30 min\.$/); assert.doesNotMatch(txt, /YES A\d/);
+  assert.match(txt, /^Needs your OK:\n/);   // 2.3.17: no code in the title either assert.match(txt, /Reply YES to approve, or NO\. Expires in 30 min\.$/); assert.doesNotMatch(txt, /YES A\d/);
   assert.deepEqual(approvals.parseDecision('Yes'), { yes: true, id });
   assert.deepEqual(approvals.parseDecision('no'), { yes: false, id });
   assert.equal(approvals.parseDecision('yes please do the other thing'), null, 'not a bare YES');
@@ -291,7 +291,7 @@ test('approvals: a new request for the same site replaces the old one; bare YES 
   const a2 = await approvals.request('publish_site', { project: 'shop', name: 'Shop ' }, 'Publish "shop" (again)', { channel: 'web' });
   assert.equal(db.get('SELECT status FROM approvals WHERE id=?', a1).status, 'superseded');
   assert.deepEqual(approvals.parseDecision('YES'), { yes: true, id: a2 });
-  const d = await approvals.decide(a1, true, 'web'); assert.equal(d.ok, false); assert.match(d.message, /replaced by a newer request/);
+  const d = await approvals.decide(a1, true, 'web'); assert.equal(d.ok, false); assert.match(d.message, /replaced by a newer one/);
   // a different site is a different request: not replaced; the stale one does not block a bare YES for the new one
   const b1 = await approvals.request('publish_site', { project: 'blog', name: 'blog' }, 'Publish "blog"', { channel: 'web' });
   assert.equal(db.get('SELECT status FROM approvals WHERE id=?', a2).status, 'pending');
@@ -323,7 +323,7 @@ test('approvals: expire after 30 min (setting approval_expiry_min); a late YES h
   approvals.expire();
   assert.equal(db.get('SELECT status FROM approvals WHERE id=?', id).status, 'expired');
   const d = approvals.parseDecision('YES'); assert.deepEqual(d, { yes: true, id });
-  const r = await approvals.decide(d.id, true, 'web'); assert.equal(r.ok, false); assert.match(r.message, /^That request \(A\d+\) expired, so nothing was done\. Ask me again\.$/);
+  const r = await approvals.decide(d.id, true, 'web'); assert.equal(r.ok, false); assert.match(r.message, /^That request expired, so nothing was done\. Ask me again\.$/);
   assert.equal(approvals.parseDecision('ok'), null, '"ok" alone is just ok');
   db.setSetting('approval_expiry_min', '120'); assert.equal(approvals.expiryMs(), 120 * 60000);
   const id2 = await approvals.request('gmail_send', { to: 'b@y.z', subject: 's', body: 'b' }, 'Send to b@y.z', { channel: 'web' });

@@ -5,6 +5,7 @@ import { cfg } from '../config.js';
 import { setting, setSetting, secret, setSecret, audit, seenOnce, log, run, now, redact } from '../db.js';
 import { token, safeEqual, hmacHex } from '../crypto.js';
 import { ownerSaid } from './inbound.js';
+import { guardOut } from '../outguard.js';
 
 const norm = (s) => { const d = String(s || '').replace(/[^\d+]/g, ''); return d.startsWith('+') ? d : (d.length === 10 ? '+1' + d : '+' + d); };
 export const allowList = () => setting('sms_allow').split(/[,\s]+/).filter(Boolean).map(norm);
@@ -78,6 +79,8 @@ export async function sendSms(to, text) {
   return { queued: true, id: r.j.id, state: r.j.state };
 }
 export async function sendOwner(text, opts = {}) {
+  text = guardOut(text, 'sms');           // 2.3.17 (D): tool-call text never leaves
+  if (!String(text ?? '').trim() && !(opts.files && opts.files.length)) return true;
   const to = opts.meta?.sms_from || allowList()[0];
   if (!to) throw new Error('No owner phone number saved for SMS');
   const t = opts.approvalId ? String(text).replace(/\n\nReply YES[\s\S]*$/, '') .slice(0, 600) + (/Reply YES A\d+/.test(String(text)) ? `\nReply YES A${opts.approvalId} or NO A${opts.approvalId}` : '\nReply YES or NO') : text;   // 2.3.16: the code only when 2+ wait

@@ -228,13 +228,13 @@ test('Natural: a job that ends waiting for his YES keeps 👍; after YES the app
   await sleep(2100);
   fs.mkdirSync(path.join(SITES, 'yes-site'), { recursive: true }); fs.writeFileSync(path.join(SITES, 'yes-site', 'index.html'), 'hi');
   const m = await fromHim('UNPUB here yes-site');
-  await replyArrives(m.before, /^Needs your OK \(A\d+\)/);     // 2.3.16: the approval request is the one message (no echo of it)
+  await replyArrives(m.before, /^Needs your OK:/);   /* 2.3.17: no code */     // 2.3.16: the approval request is the one message (no echo of it)
   await sleep(300);
   assert.deepEqual(reactsOn(m.id), ['👍'], 'no ✅ yet');
   assert.ok(fs.existsSync(path.join(SITES, 'yes-site')), 'nothing deleted before his YES');
   const ap = db.get("SELECT id FROM approvals WHERE tool='unpublish_site' AND status='pending' ORDER BY id DESC");
   const y = await fromHim('YES A' + ap.id);
-  await replyArrives(y.before, /^Done A\d+: Deleted /);
+  await replyArrives(y.before, /^Done: Deleted /);
   await until(() => reactsOn(m.id).includes('✅'), 5000, '✅ after YES');
   assert.deepEqual(reactsOn(m.id), ['👍', '✅']);
   assert.ok(!fs.existsSync(path.join(SITES, 'yes-site')));

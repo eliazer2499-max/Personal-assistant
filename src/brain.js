@@ -11,9 +11,11 @@ import { validateUnsent, claimFiles, filesOfMessage, modelInput, MAX_INLINE } fr
 import * as aikeys from './aikeys.js';
 import { withoutStatusEmoji, splitStatusEmoji, isNoReply, NO_REPLY } from './emoji.js';
 import * as reactions from './reactions.js';
-import { withoutApprovalEcho, withoutPastedCode } from './tidy.js';
+import { doneMessage } from './approvals.js';
+import { withoutApprovalEcho, withoutPastedCode, restatesResult, asksForDesign, mentionsPlaceholder, LOGO_NUDGE } from './tidy.js';
 import { parseReplies, plainAsReplies, resolveReplies, repliesJson, looksLikeReplies, repliesToPlain } from './replies.js';
 import { classify } from './aikeys.js';
+import { parseHarmony } from './harmony.js';
 import { outputModalities, detectPictures } from './pictures.js';
 export { aikeys };
 
@@ -405,7 +407,10 @@ const bullet = (rows) => rows.map(x => `• ${x.name}: ${x.reason}`).join('\n');
 export async function callModel(args, opts = {}) {
   if (cfg.testMode && cfg.mockModule && setting('provider') === 'gemini' && !cfg.geminiBase) {
     if (!mockFn) mockFn = (await import(cfg.mockModule)).default;
-    return mockFn(args);
+    const r = await mockFn(args);
+    const h = readHarmony(r, args);           // 2.3.17: the fake model may also answer in harmony text
+    if (h.bad) throw userError('The AI answered with a broken tool command instead of running it.');
+    return h.resp;
   }
   const withMedia = heavyMedia(args.items || []);
   const use = opts.use && aikeys.USES.includes(opts.use) ? opts.use : null;
@@ -449,6 +454,17 @@ export async function callModel(args, opts = {}) {
           try { resp = await once(smaller.args, smaller.maxOut); }
           catch (e2) { if (e2.keyFail?.kind === 'too_large') e2.keyFail.reason += ' (also after making the request smaller)'; throw e2; }
         }
+        // 2.3.17 (D, Abish's 1:26 AM screenshot): a key (the 2nd one, gpt-oss) wrote its tool call as harmony text
+        // ("<|start|>assistant to=functions web search…json{…}<|call|>") instead of a real tool call. Read it back into a
+        // real call and run it; if it can't be read, ask the same key once more, then the next key. Never sent as words.
+        let h = readHarmony(resp, first.args);
+        if (h.bad) {
+          log('brain', `key "${k.name}": answered with tool-call text it did not run; asking once more`);
+          h = readHarmony(await once(first.args, first.maxOut), first.args);
+        }
+        if (h.bad) throw keyFail({ kind: 'bad_answer', reason: 'answered with a broken tool command instead of running it', until: 0, problem: null });
+        if (h.fixed) audit('assistant', 'brain.harmony_fixed', `key "${k.name}": ${h.fixed} tool call(s) written as text were run as real tool calls`);
+        resp = h.resp;
         aikeys.markOk(k.id);
         if (String(k.id) !== prevInUse && reasons.size) {
           const [fid, why] = [...reasons.entries()][0];
@@ -476,6 +492,20 @@ export async function callModel(args, opts = {}) {
   throw userError(`I couldn't get an answer from any of your AI keys:\n${bullet(rows)}${off ? `\n(${off} more switched off.)` : ''}\nFix or add one in Settings → Brain (AI model) → AI keys.`);
 }
 function userError(msg) { const e = new Error(msg); e.userMessage = msg; return e; }
+/**
+ * 2.3.17: harmony tool-call text in a model's answer → real tool calls (only tools this request offered).
+ * Returns { resp, fixed: number of calls read back, bad: the answer was tool-call text that could not be read }.
+ */
+export function readHarmony(resp, args = {}) {
+  const r = resp || {};
+  const names = args.noTools ? [] : (args.tools || []).map(t => t && t.name).filter(Boolean);
+  const h = parseHarmony(r.text || '', names);
+  if (!h.found) return { resp: r, fixed: 0, bad: false };
+  const extra = h.calls.map((c, i) => ({ id: 'hx' + Date.now().toString(36) + i, name: c.name, args: c.args }));
+  const calls = [...(r.calls || []), ...extra];
+  const bad = !calls.length && (h.unread > 0 || !h.text);
+  return { resp: { ...r, text: h.text, calls, ...(extra.length ? { raw: undefined } : {}) }, fixed: extra.length, bad };
+}
 
 // ---------------- 2.3.2: what can this model do? (part of Test) ----------------
 // Tiny inputs, small answers, short timeouts, at most one call per capability, all at the same time.
@@ -800,13 +830,26 @@ function reactGuidance(channel) {
 // 2.3.16 (Abish, Nov 8: he was asked "reply YES and I'll publish", then got approval A2, then a message that A2 was
 // waiting, and had to say YES twice): the approval request is the one confirmation.
 export const APPROVAL_RULES = [
-  '- Tools that send to other people, delete, spend, change servers or publish do NOT run right away: calling one files an approval request (code like A12), and he gets that request message himself, with the code and how to say YES. So do NOT ask "should I?" or "reply YES and I\'ll…" before calling such a tool: just call it. That request IS his confirmation, and he answers it once. Do not send another message saying that an approval is waiting or repeating its code. Never claim such an action happened until a later note says it was approved and done.',
+  '- Tools that send to other people, delete, spend, change servers or publish do NOT run right away: calling one files an approval request, and he gets that request message himself, with how to say YES. So do NOT ask "should I?" or "reply YES and I\'ll…" before calling such a tool: just call it. That request IS his confirmation, and he answers it once. Do not send another message saying that an approval is waiting, and never mention request codes (like A12) to him. Never claim such an action happened until a later note says it was approved and done.',
+  '- After his YES the result goes to him by itself in one short message (like "Published: <link>" with a picture). Do not send it again in your own words.',
   '- Everything else needs no YES from him: writing or changing files in your own workspace projects, building, testing, screenshots. Just do it.',
 ];
 // 2.3.16 (Abish, Nov 8, after it pasted a whole index.html into his chat: "Rather send a picture").
 export const SITE_SHOW_RULES = [
   '- Showing site work: never paste HTML, CSS or JavaScript code into the chat. After building or changing a site, take a phone-size site_screenshot and give him the picture with send_file, plus 1–2 short lines of what changed. Show code only when he asks for it, and then as a file with send_file (the .html file, or a .zip of the project), not as pasted text.',
   '- If site_screenshot says there is no browser on this server, tell him in 1–2 lines what changed instead (and give the link if the site is published), and mention once that the optional browser add-on (optional/install-browser.sh) lets you send pictures.',
+];
+// 2.3.17 (Abish, Nov 8 1:23 AM: asked for the design and a logo, got "I've removed the details and added a logo
+// placeholder", then wrote "Again, I need the design and the logo").
+export const DESIGN_RULES = [
+  '- Logos and design: when he asks for a logo, make a REAL one yourself — write it as an SVG file (logo.svg in the project) with clean shapes: a simple mark or monogram plus the name, in the site\'s own colours and style, readable when small. Put it in the page (header, and as the favicon) and keep the file so he can reuse it. Never use a placeholder, a grey box, "LOGO" / "Your logo" text or a stock placeholder image, unless he asks for a placeholder.',
+  '- When he asks for a design (or a "new look"): really redesign it — colours, fonts, spacing, a strong top section, clear buttons, good on a phone. Do not just remove things. Then send a phone-size screenshot and 1–2 lines.',
+  '- If he sends his own logo or picture, use his.',
+  // 2.3.17 (E, Abish Nov 8 1:26 AM: "a designed html page … add a go back to site button" came out as a broken "Logo" picture and "Private Link" on white)
+  '- A "designed" page (or any page he will look at) means a real layout: a background or card in the site\'s colours, a clear heading and short text, its own logo, good spacing, readable on a phone — never plain text on a white page. Every button he asked for (e.g. "Go back to site") must be a real, big, clearly visible button that links to the right place.',
+  '- Pictures in a site: never search the web for a logo and never link a picture from another site (hot-linking). Make the logo yourself as logo.svg in the project and use it with a relative path (src="logo.svg"); other pictures are files in the project too.',
+  '- Before you send a screenshot or call publish_site: take a site_screenshot and LOOK at it and at problems_found / must_fix / buttons_on_first_screen. No broken picture (alt text like "Logo" showing), no missing file, the requested buttons visible, and it looks designed. If not, fix it first. publish_site refuses a page with broken or hot-linked pictures.',
+  '- "Again, I need…", "I still need…", "I asked for…", "still not…" means your last answer missed what he asked: that request is now the main job. Do exactly that, fully, before anything else, and do not repeat what you already did.',
 ];
 export function systemPrompt(channel, opts = {}) {
   const tz = setting('timezone') || 'UTC';
@@ -833,6 +876,7 @@ export function systemPrompt(channel, opts = {}) {
     '- Building: put each app/site in its own workspace project. Write files with file_write, build/test with run_command, then publish with publish_site (this server), github_publish or cloudflare_pages_publish. Give the owner the link.',
     '- A site published on this server can have its own 404.html (in its top folder, in the site\'s style, with a link back to its home page): it is shown for any address in the site that does not exist. Without one, visitors get a plain built-in "Page not found" page. Add a 404.html when you build a real multi-page site.',
     ...SITE_SHOW_RULES,
+    ...DESIGN_RULES,
     '- Checking a site (2.3.6): after building or changing a site, take a phone-size site_screenshot and look at the picture. Fix obvious problems (sideways scrolling, tiny text, broken pictures, things on top of each other, cut-off buttons), take one more screenshot to check, then share it. At most 2 rounds of fixes; then tell the owner what is left.',
     '- Videos (2.3.6): for a video request, plan the scenes first (picture, a few words, seconds each), make or collect the pictures (image_generate, his photos, project files), then render with video_make. It checks the length and size with ffprobe and shows you 2 frames: look at them before sending. If the words are wrong or cut off, fix and render again (at most twice), then send it.',
     ...browserGuide(),
@@ -1047,6 +1091,18 @@ function closeBatch(b) {
   return b.inbox.splice(0);    // messages it never read: they get their own job
 }
 
+/** 2.3.17: his last words in a chat (past hour, newest 3), for a job after his YES that has none of its own. */
+export function recentOwnerWords(chatId) {
+  if (!chatId) return '';
+  return all("SELECT text FROM messages WHERE chat_id=? AND role='owner' AND ts>? ORDER BY id DESC LIMIT 4", chatId, now() - 3600 * 1000)
+    .map(r => String(r.text || '')).filter(t => !/^\s*(yes|y|ok|okay|approve|no)\b[\s\w#]{0,6}$/i.test(t)).slice(0, 3).reverse().join('\n');
+}
+/** 2.3.17: the result message he got after his YES (null = unknown). */
+export function toldAfterYes(approvalId) {
+  const a = get('SELECT tool,args,result,status FROM approvals WHERE id=?', approvalId);
+  if (!a || a.status !== 'done') return null;
+  try { return doneMessage(a.tool, JSON.parse(a.args), JSON.parse(a.result || 'null')); } catch { return null; }
+}
 async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRows, parentJob, batch }) {
   const b = batch || null;
   const job = get('SELECT * FROM jobs WHERE id=?', id);
@@ -1077,6 +1133,10 @@ async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRow
   const ownerMsgs = msgs || (!hidden && !isHelper && channel !== 'system' ? [{ id: before, text, meta }] : []);
   const ctx = { jobId: id, channel, meta, actor: 'assistant', chatId: chatId || job.chat_id, isHelper, deadline, ownerMsgs, reacted: [] };
   if (b) b.ctx = ctx;
+  // 2.3.17: what he asked for, for the logo/design guard (a job after his YES has no messages of its own: his last
+  // words in this chat from the past hour stand in)
+  ctx.askedText = () => (ownerMsgs.length ? ownerMsgs.map(m => m.text || '').join('\n') : (hidden && !isHelper ? recentOwnerWords(ctx.chatId) : ''));
+  let designNudged = false;
   let final = '', steps = 0, refolds = 0, leftover = [];
   // 2.3.7: Natural reactions. A "real request" = this job used at least one tool other than react (chit-chat, a bare
   // thanks/ok or a question answered from memory use none). First such tool → 👍 on his message; finished well → ✅.
@@ -1148,6 +1208,16 @@ async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRow
       if (!resp.calls?.length || outOfRoom) {
         // 2.3.15: he wrote more while this answer was being written → rewrite it to cover everything (not two answers).
         if (!outOfRoom && b && b.inbox.length && refolds < MAX_REFOLDS) { refolds++; foldIn(resp.text || ''); continue; }
+        // 2.3.17 (Abish: "Again, I need the design and the logo" after "I added a logo placeholder"): he asked for a
+        // logo/design and it left a placeholder (or made no logo and says "placeholder") → one more round to make it.
+        if (!outOfRoom && !isHelper && !designNudged && !ctx.logoMade && asksForDesign(ctx.askedText()) &&
+            (ctx.placeholderWritten || mentionsPlaceholder(resp.text || ''))) {
+          designNudged = true;
+          audit('assistant', 'design.placeholder_nudge', `job ${id}: a placeholder instead of the logo/design he asked for`);
+          items.push({ role: 'assistant', text: resp.text || '(no answer)' });
+          items.push({ role: 'user', text: LOGO_NUDGE });
+          continue;
+        }
         final = resp.text || (outOfRoom ? 'I hit the step limit for one job.' : (ctx.reacted.length ? '' : '(no answer)'));
         if (outOfRoom) unfinished = true;
         break;
@@ -1270,6 +1340,15 @@ async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRow
       }
       // 2.3.16: no reaction could be placed → nothing is sent (never a bare "👍" as its own message)
       if (isNoReply(final)) { run('UPDATE jobs SET result=? WHERE id=?', '(no reply; the reaction could not be placed)', id); log('job', id, 'reaction-only reply: no reaction possible on', channel); await autoDone(); return ''; }
+    }
+  }
+  // 2.3.17 (Abish, Nov 8: "Done A4: published at …" then "Site published: …"): after his YES he already got the one
+  // result message; a follow-up answer that only says it again is not sent.
+  if (status === 'done' && job.parent_approval && final && !isNoReply(final) && splitStatusEmoji(final).where !== 'only') {   // (a lone emoji is a reaction, handled below)
+    const told = toldAfterYes(job.parent_approval);
+    if (told !== null && restatesResult(final, told)) {
+      audit('assistant', 'reply.restated_result', `job ${id}: "${final.slice(0, 80)}" (he already had: ${told.slice(0, 80)})`);
+      final = NO_REPLY;
     }
   }
   if (status === 'done' && !ownerMsgs.length && isNoReply(final)) { run('UPDATE jobs SET result=? WHERE id=?', '(nothing to say)', id); return ''; }

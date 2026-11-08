@@ -74,11 +74,13 @@ export async function execTool(name, args, ctx) {
   args = args || {};
   for (const r of (t.required || [])) if (args[r] === undefined || args[r] === '') return { error: `Missing "${r}"` };
   try {
+    // 2.3.17 (E): a check that must pass before his YES is even asked for (publish_site: no broken or hot-linked pictures)
+    if (t.precheck) { const pc = await t.precheck(args, ctx); if (pc) return pc; }
     if (t.approval) {
       const summary = typeof t.approval === 'function' ? t.approval(args, ctx) : `${name} ${JSON.stringify(args)}`;
       if (summary) {
         const id = await request(name, args, summary, ctx);
-        return { status: 'waiting_for_owner_approval', approval: 'A' + id, note: `Not done yet: A${id} waits for the owner's YES; he already got the request with its code, so do not repeat it or say it is done.` };
+        return { status: 'waiting_for_owner_approval', approval: 'A' + id, note: `Not done yet: A${id} waits for the owner's YES; he already got the request, so do not repeat it, do not mention its code, and do not say it is done.` };
       }
     }
     const res = await t.run(args, ctx);

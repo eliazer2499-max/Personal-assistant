@@ -224,10 +224,10 @@ test('approvals and reminders also go to WhatsApp; "NO A#" there works like on o
   const { notifyOwner } = await import('../src/notify.js');
   AP.sent.length = 0;
   const id = await approvals.request('calculator', { expression: '1+1' }, 'Do a harmless thing', { channel: 'web' });
-  await until(() => sentTexts().some(t => t.includes(`Needs your OK (A${id})`) && (t.includes(`YES A${id}`) || t.includes('Reply YES to approve, or NO.'))   /* 2.3.16: no code when it is the only one */), 5000, 'approval on WhatsApp');
+  await until(() => sentTexts().some(t => /^Needs your OK(?: \(A\d+\))?:/.test(t) &&   /* 2.3.17: code only when several wait */ (t.includes(`YES A${id}`) || t.includes('Reply YES to approve, or NO.'))   /* 2.3.16: no code when it is the only one */), 5000, 'approval on WhatsApp');
   assert.equal(db.get('SELECT status FROM approvals WHERE id=?', id).status, 'pending', 'nothing runs without his answer');
   push({ from: 'user:777', id: 'wamid.no1', type: 'text', text: { body: `NO A${id}` } });
-  await until(() => sentTexts().some(t => t.includes(`Cancelled A${id}`)), 5000, 'decision reply');
+  await until(() => sentTexts().some(t => /^Cancelled(?: \(A\d+\))?\. Nothing was done\./.test(t)), 5000, 'decision reply');
   assert.equal(db.get('SELECT status, decided_via FROM approvals WHERE id=?', id).decided_via, 'whatsapp_agent');
   await notifyOwner('⏰ Reminder: call Avrum');
   await until(() => sentTexts().some(t => t.includes('Reminder: call Avrum')), 5000, 'reminder');

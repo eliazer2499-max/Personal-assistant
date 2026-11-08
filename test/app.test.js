@@ -131,7 +131,7 @@ test('ssh_run: read-only runs at once, a change waits for YES', async () => {
   j = await idle(15000);
   // 2.3.16: the approval request (its own message) is the answer; no second "waiting for your OK" message
   assert.doesNotMatch(lastAssistant(j), /waiting for your OK/);
-  assert.ok(j.messages.some(m => m.role === 'approval' && /^Needs your OK \(A\d+\)/.test(m.text)));
+  assert.ok(j.messages.some(m => m.role === 'approval' && /^Needs your OK:\n/.test(m.text)   /* 2.3.17: no code when it is the only one */));
   const ap = (await call('/api/approvals')).j.approvals.find(a => a.tool === 'ssh_run');
   assert.match(ap.summary, /sudo systemctl restart nginx/);
   r = await call('/api/approvals/' + ap.id, { yes: false }); assert.match(r.j.message, /Cancelled/);

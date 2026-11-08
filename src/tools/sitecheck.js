@@ -134,10 +134,14 @@ const CHECKS = `(() => {
     const own = [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim().length > 2);
     if (own && parseFloat(cs.fontSize) < 12 && tiny.length < 6) tiny.push(name(e) + ' ' + cs.fontSize + ' "' + e.textContent.trim().slice(0, 30) + '"');
   }
-  const broken = [...document.images].filter(i => i.complete && i.naturalWidth === 0 && (i.currentSrc || i.src)).map(i => (i.currentSrc || i.src).slice(0, 160)).slice(0, 8);
+  const broken = [...document.images].filter(i => (i.complete && i.naturalWidth === 0) || !(i.getAttribute('src') || i.getAttribute('srcset') || '').trim()).map(i => ((i.currentSrc || i.src || '(no src)') + (i.alt ? ' (shows "' + i.alt.slice(0, 30) + '")' : '')).slice(0, 160)).slice(0, 8);
+  // 2.3.17 (E): pictures pulled from another site (they break, or change, whenever that site does)
+  const hot = [...document.images].map(i => i.currentSrc || i.src || '').filter(s => /^https?:/i.test(s) && (() => { try { return new URL(s).origin !== location.origin; } catch { return false; } })()).map(s => s.slice(0, 160)).slice(0, 8);
+  const vh = window.innerHeight;
+  const buttons = [...document.querySelectorAll('a[href],button,[role=button],input[type=submit],input[type=button]')].filter(e => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 8 && r.height > 8 && r.top < vh && r.bottom > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && parseFloat(cs.opacity || '1') > 0.2; }).map(e => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ').slice(0, 40)).filter(Boolean).slice(0, 10);
   const meta = document.querySelector('meta[name=viewport]');
   return { title: document.title.slice(0, 120), page_height: Math.max(de.scrollHeight, document.body ? document.body.scrollHeight : 0),
-    scrolls_sideways: de.scrollWidth > vw + 2 || wide.length > 0, layout_width: Math.max(window.innerWidth, de.scrollWidth), page_width: Math.max(de.scrollWidth, ...[...document.querySelectorAll('body *')].slice(0, 3000).map(e => Math.round(e.getBoundingClientRect().width))), wider_than_screen: wide, tiny_text: tiny, broken_images: broken,
+    scrolls_sideways: de.scrollWidth > vw + 2 || wide.length > 0, layout_width: Math.max(window.innerWidth, de.scrollWidth), page_width: Math.max(de.scrollWidth, ...[...document.querySelectorAll('body *')].slice(0, 3000).map(e => Math.round(e.getBoundingClientRect().width))), wider_than_screen: wide, tiny_text: tiny, broken_images: broken, hotlinked_images: hot, buttons_on_first_screen: buttons,
     has_viewport_meta: !!meta, dir: de.dir || getComputedStyle(document.body || de).direction, lang: de.lang || '' };
 })()`;
 
@@ -213,6 +217,98 @@ export async function screenshotUrl(url, { sizes = [PHONE], fullPage = false, wa
   });
 }
 
+// ---------------- 2.3.17 (E): the page's own files, checked without a browser ----------------
+// Abish, Nov 8 1:26 AM: "a designed html page … add a go back to site button" came out as a broken picture ("Logo"
+// alt text) and "Private Link" on white. The logo was searched for on the web and linked from another site.
+// This reads the site's .html/.css files and lists: pictures that point at files that are not there, pictures linked
+// from other sites (hot-linked), images with no address, and logo placeholders.
+const IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp)(?:[?#]|$)/i;
+const SKIP_REF = /^(?:data:|blob:|#|mailto:|tel:|javascript:|about:|sms:|whatsapp:)/i;
+function refsOf(file, text) {
+  const out = [];   // { ref, picture }
+  const add = (ref, picture) => { ref = String(ref || '').trim().replace(/^['"]|['"]$/g, ''); out.push({ ref, picture }); };
+  if (/\.css$/i.test(file)) { for (const m of text.matchAll(/url\(\s*([^)]*?)\s*\)/gi)) add(m[1], true); return out; }
+  for (const m of text.matchAll(/<(img|source|image|video|input|link|script)\b([^>]*)>/gi)) {
+    const tag = m[1].toLowerCase(), at = m[2];
+    const attr = (n) => { const r = new RegExp('(?:^|\\s)' + n + '\\s*=\\s*("([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i').exec(at); return r ? (r[2] ?? r[3] ?? r[4] ?? '') : null; };
+    if (tag === 'img') { const s = attr('src'), ss = attr('srcset'); if ((s === null || !s.trim()) && !ss) out.push({ ref: '', picture: true, empty: true }); if (s && s.trim()) add(s, true); }
+    if ((tag === 'img' || tag === 'source') && attr('srcset')) for (const part of attr('srcset').split(',')) add(part.trim().split(/\s+/)[0], true);
+    if (tag === 'source' && attr('src')) add(attr('src'), false);
+    if (tag === 'image') { const h = attr('href') ?? attr('xlink:href'); if (h) add(h, true); }
+    if (tag === 'video' && attr('poster')) add(attr('poster'), true);
+    if (tag === 'input' && /image/i.test(attr('type') || '') && attr('src')) add(attr('src'), true);
+    if (tag === 'link') { const rel = (attr('rel') || '').toLowerCase(), h = attr('href'); if (h && /icon|stylesheet|preload|manifest/.test(rel)) add(h, /icon/.test(rel) || IMG_EXT.test(h)); }
+    if (tag === 'script' && attr('src')) add(attr('src'), false);
+  }
+  for (const m of text.matchAll(/style\s*=\s*("[^"]*"|'[^']*')/gi)) for (const u of m[1].matchAll(/url\(\s*([^)]*?)\s*\)/gi)) add(u[1].replace(/&quot;/g, ''), true);
+  for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) for (const u of m[1].matchAll(/url\(\s*([^)]*?)\s*\)/gi)) add(u[1], true);
+  return out;
+}
+/** Static check of a site folder. Returns { missing, hotlinked, empty, placeholders, problems, mustFix }. */
+export function checkSiteFiles(root, { siteName = '' } = {}) {
+  const res = { missing: [], hotlinked: [], empty: [], placeholders: [], problems: [], mustFix: false };
+  let rootReal; try { rootReal = fs.realpathSync(root); } catch { return res; }
+  const files = [];
+  const walk = (d, depth) => { let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of es) { if (e.name === 'node_modules' || e.name === '.git' || e.name === 'screenshots') continue; const p = path.join(d, e.name);
+      if (e.isDirectory() && depth < 5) walk(p, depth + 1); else if (e.isFile() && /\.(?:html?|css)$/i.test(e.name) && files.length < 200) files.push(p); } };
+  walk(rootReal, 0);
+  let tidy = null;
+  for (const f of files) {
+    let text = ''; try { text = fs.readFileSync(f, 'utf8'); } catch { continue; }
+    const rel = path.relative(rootReal, f);
+    for (const r of refsOf(f, text)) {
+      if (r.empty) { res.empty.push(rel); continue; }
+      const ref = r.ref;
+      if (!ref || SKIP_REF.test(ref)) continue;
+      if (/^(?:https?:)?\/\//i.test(ref)) { if (r.picture || IMG_EXT.test(ref)) res.hotlinked.push(`${rel}: ${ref.slice(0, 140)}`); continue; }
+      if (/^[a-z][a-z0-9+.-]*:/i.test(ref)) continue;
+      let clean = ref.split(/[?#]/)[0]; try { clean = decodeURIComponent(clean); } catch {}
+      if (!clean) continue;
+      let target;
+      if (clean.startsWith('/')) {
+        const m = /^\/sites\/([^/]+)\/(.*)$/.exec(clean);
+        if (m && (!siteName || m[1] === siteName)) target = path.join(rootReal, m[2]);
+        else { res.missing.push(`${rel}: ${ref.slice(0, 140)} (an address from the top of the server, not inside this site — use a relative path like "${path.basename(clean) || 'logo.svg'}")`); continue; }
+      } else target = path.resolve(path.dirname(f), clean);
+      if (target.endsWith(path.sep) || clean.endsWith('/')) target = path.join(target, 'index.html');
+      const inside = target === rootReal || target.startsWith(rootReal + path.sep);
+      if (!inside || !fs.existsSync(target)) res.missing.push(`${rel}: ${ref.slice(0, 140)}${inside ? '' : ' (outside the site folder)'}`);
+    }
+    if (/\.html?$/i.test(f) && /logo|placeholder|placehold/i.test(text)) {
+      tidy = tidy || { has: (t) => /\blogo[\s_-]*(?:placeholder|here|goes here|coming soon)\b|\bplaceholder[\s_-]*(?:logo|image|icon|img)\b|\byour[\s_-]*logo\b|via\.placeholder\.com|placehold\.(?:co|it)|dummyimage\.com/i.test(t) };
+      if (tidy.has(text)) res.placeholders.push(rel);
+    }
+  }
+  const uniq = (a) => [...new Set(a)].slice(0, 10);
+  res.missing = uniq(res.missing); res.hotlinked = uniq(res.hotlinked); res.empty = uniq(res.empty); res.placeholders = uniq(res.placeholders);
+  if (res.missing.length) res.problems.push('pictures/files the page uses that are not in the site folder (they show as broken pictures): ' + res.missing.join('; '));
+  if (res.empty.length) res.problems.push('<img> with no picture address in: ' + res.empty.join(', '));
+  if (res.hotlinked.length) res.problems.push('pictures linked from other sites (hot-linked; they break or change any time — put your own file in the project instead): ' + res.hotlinked.join('; '));
+  if (res.placeholders.length) res.problems.push('a logo/picture placeholder in: ' + res.placeholders.join(', '));
+  res.mustFix = res.problems.length > 0;
+  return res;
+}
+export const FIX_PICTURES = 'Fix this before you show him the page or ask for his YES: make the logo yourself as an SVG file in the project (e.g. logo.svg: a simple mark + the name, in the site\'s colours) and use it with a relative path (src="logo.svg"). Never link a picture from another site and never search the web for a logo. Take a new site_screenshot and check it shows no broken picture.';
+
+/** 2.3.17 (E): the check before his YES for publish_site — files first, then (with a browser) the real page. */
+export async function precheckSite(dir, { siteName = '' } = {}) {
+  const st = checkSiteFiles(dir, { siteName });
+  const problems = [...st.problems];
+  if (!st.mustFix && findChromium()) {
+    let server = null;
+    try {
+      server = await serveFolder(dir);
+      const r = await screenshotUrl(server.base, { sizes: [PHONE], waitMs: 300 });
+      const f = r.shots[0].facts;
+      if (f.broken_images?.length) problems.push('pictures that did not load in the browser: ' + f.broken_images.join(', '));
+      if (f.hotlinked_images?.length) problems.push('pictures linked from other sites: ' + f.hotlinked_images.join(', '));
+    } catch { /* the browser check is extra; the file check above already ran */ }
+    finally { if (server) server.close(); }
+  }
+  return { ok: !problems.length, problems };
+}
+
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
 
 export const siteScreenshot = {
@@ -273,11 +369,20 @@ export const siteScreenshot = {
       if (f.tiny_text?.length) problems.push('text smaller than 12px: ' + f.tiny_text.join('; '));
       if (f.broken_images?.length) problems.push('pictures that did not load: ' + f.broken_images.join(', '));
       if (!f.has_viewport_meta) problems.push('no <meta name="viewport" content="width=device-width, initial-scale=1"> (phones will show it zoomed out)');
+      if (f.hotlinked_images?.length) problems.push('pictures linked from other sites (hot-linked): ' + f.hotlinked_images.join(', '));
       for (const e of new Set(r.errors)) problems.push(e);
+      // 2.3.17 (E): the site's own files too — a picture that points at a missing file, or at another site
+      const folder = site ? path.join(cfg.sitesDir, safeName(site, 'site name')) : (!url ? path.dirname(inProject(project, rel || 'index.html')) : null);
+      const st = folder ? checkSiteFiles(folder, { siteName: site ? safeName(site) : '' }) : { problems: [], mustFix: false };
+      for (const p of st.problems) if (!problems.includes(p)) problems.push(p);
+      const pictureTrouble = st.mustFix || !!f.broken_images?.length || !!f.hotlinked_images?.length;
       const out = { ok: true, opened: url ? target : (site ? 'site ' + site : `project ${project}/${rel || 'index.html'}`), title: f.title, page_height_px: f.page_height,
         saved, problems_found: problems.length ? problems : ['none of the automatic checks found a problem'],
-        look: 'The screenshot is attached for you to look at now. Check it like a phone user: text readable, nothing cut off or overlapping, pictures showing, buttons big enough, Hebrew/Yiddish right-to-left. Fix what is wrong, then take one more screenshot.' };
-      if (send_to_owner) {
+        buttons_on_first_screen: f.buttons_on_first_screen || [],
+        ...(pictureTrouble ? { must_fix: FIX_PICTURES } : {}),
+        look: 'The screenshot is attached for you to look at now. If he asked for a designed page, it must look designed (real layout and colours, not plain text on white), with its own logo, and every button he asked for visible in buttons_on_first_screen. Check it like a phone user: text readable, nothing cut off or overlapping, pictures showing, buttons big enough, Hebrew/Yiddish right-to-left. Fix what is wrong, then take one more screenshot.' };
+      if (send_to_owner && pictureTrouble) out.sent_to_owner = 'NOT sent: the page has broken or hot-linked pictures. ' + FIX_PICTURES;   // 2.3.17 (E)
+      else if (send_to_owner) {
         const { sendFile } = await import('./sendfile.js');
         const sent = await sendFile.run({ path: saved[0].file, caption: caption || '' }, ctx);
         out.sent_to_owner = sent.error ? 'not sent: ' + sent.error : (sent.whatsapp ? 'in the chat; WhatsApp: ' + sent.whatsapp : 'in the chat');

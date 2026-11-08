@@ -4,6 +4,7 @@ import { setting, run, get, now, seenOnce, log, audit } from '../db.js';
 import { gapi, accounts } from '../google.js';
 import { bodyText, rawEmail, ownerAddresses } from '../tools/google.js';
 import { ownerSaid } from './inbound.js';
+import { guardOut } from '../outguard.js';
 
 const G = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const hdr = (m, n) => (m.payload?.headers || []).find(h => h.name.toLowerCase() === n.toLowerCase())?.value || '';
@@ -56,6 +57,8 @@ export async function poll() {
 }
 
 export async function sendOwner(text, opts = {}) {
+  text = guardOut(text, 'email');           // 2.3.17 (D): tool-call text never leaves
+  if (!String(text ?? '').trim() && !(opts.files && opts.files.length)) return true;
   const meta = opts.meta || {};
   const acct = meta.account || account();
   if (!acct) throw new Error('No Google account connected for email');

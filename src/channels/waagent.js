@@ -33,6 +33,7 @@ import { mainChatId } from '../chats.js';
 import * as files from '../files.js';
 import { splitStatusEmoji, cleanEmoji } from '../emoji.js';
 import { mirrorWaReaction } from '../reactions.js';
+import { guardOut } from '../outguard.js';
 
 export const CHANNEL = 'whatsapp_agent';
 export const VAULT_NAME = 'whatsapp-agent';
@@ -540,6 +541,8 @@ export async function sendFileNow(row, caption = '') {
 
 /** Send to the owner's agent chat. opts: { wait, files: [file rows] }. Without wait it returns at once (queued). */
 export async function sendOwner(text, opts = {}) {
+  text = guardOut(text, 'waagent');           // 2.3.17 (D): tool-call text never leaves
+  if (!String(text ?? '').trim() && !(opts.files && opts.files.length)) return true;
   if (!enabled()) throw new Error('WhatsApp Agent is turned off');
   if (!hasKey()) throw new Error('No WhatsApp Agent key saved');
   const to = setting('wa_agent_creator');

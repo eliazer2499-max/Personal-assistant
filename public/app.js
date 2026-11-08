@@ -439,7 +439,7 @@ function addBubble(m, approvalStatus) {
   log.querySelector('.empty')?.remove();
   if (m.role === 'approval' && m.meta && m.meta.approval) {
     const id = m.meta.approval, st = (approvalStatus || {})[id] || 'pending';
-    log.append(approvalCard({ id, summary: m.text.replace(/^Needs your OK \(A\d+\):\n/, '').replace(/\n\nReply YES[\s\S]*$/, ''), status: st }, true));
+    log.append(approvalCard({ id, summary: m.text.replace(/^Needs your OK(?: \(A\d+\))?:\n/, '').replace(/\n\nReply YES[\s\S]*$/, ''), status: st }, true));
   } else {
     const via = m.channel && !['web', 'system'].includes(m.channel) ? h('span', { class: 'via' }, 'via ' + ({ whatsapp_agent: 'WhatsApp', whatsapp: 'WhatsApp' }[m.channel] || m.channel)) : null;
     const files = (m.files || []).map(f => fileView(f, m.role === 'assistant'));
@@ -479,7 +479,7 @@ function approvalCard(a, inChat) {
   const pending = a.status === 'pending';
   const yes = h('button', { class: 'primary', onclick: () => decideAp(a.id, true, card, out) }, 'Approve');
   const no = h('button', { class: 'danger', onclick: () => decideAp(a.id, false, card, out) }, 'Deny');
-  const card = h('div', { class: 'card ap', 'data-ap': a.id }, h('h3', {}, `Needs your OK · A${a.id}`), h('pre', {}, a.summary),
+  const card = h('div', { class: 'card ap', 'data-ap': a.id }, h('h3', {}, 'Needs your OK'), h('pre', {}, a.summary),
     pending ? h('div', { class: 'row' }, yes, no) : h('span', { class: 'pill' + (a.status === 'done' ? ' ok' : '') }, a.status), out,
     !inChat && a.expires && pending ? h('p', { class: 'fine' }, 'Expires ' + fmt(a.expires)) : null);
   return card;
@@ -573,7 +573,7 @@ function chatsView() {
 
 // ---------------- approvals ----------------
 function approvalsView() {
-  const body = h('div', { class: 'page' }, h('p', { class: 'fine' }, 'Anything that sends to other people, deletes, spends, changes a server or publishes waits here for your OK. Requests expire after 24 hours. You can also answer “YES A12” on Telegram, WhatsApp, text or email.'));
+  const body = h('div', { class: 'page' }, h('p', { class: 'fine' }, 'Anything that sends to other people, deletes, spends, changes a server or publishes waits here for your OK. Requests expire after 30 minutes (Settings can change it). You can also answer YES or NO on Telegram, WhatsApp, text or email (with the code, like “YES A12”, only when several are waiting).'));
   const list = h('div', {}); body.append(list);
   let all = false;
   const toggle = h('button', { class: 'small', onclick: () => { all = !all; toggle.textContent = all ? 'Show waiting only' : 'Show history'; load(); } }, 'Show history');
@@ -1060,7 +1060,7 @@ function waAgentCard(w) {
     btns, out,
     h('label', { style: 'margin-top:14px;color:var(--text)', id: 'waareact-label' }, 'Reactions'), rSeg, rEmojiRow, rHelp,
     rOut,
-    h('p', { class: 'fine' }, 'Only you (the agent’s creator) can chat with it. Reminders, morning summary and approval requests also go there. Approve by tapping Approve in this app, or reply “YES A12”. WhatsApp allows 12 messages a minute, so long answers may take a moment. Messages there are not end-to-end encrypted.'));
+    h('p', { class: 'fine' }, 'Only you (the agent’s creator) can chat with it. Reminders, morning summary and approval requests also go there. Approve by tapping Approve in this app, or reply YES (with the code, like “YES A12”, only when several are waiting). WhatsApp allows 12 messages a minute, so long answers may take a moment. Messages there are not end-to-end encrypted.'));
   paint(w);
   // keep the status fresh while this page is open
   const tick = async () => { if (!card.isConnected) return; try { paint(await api('/api/wa-agent')); } catch {} setTimeout(tick, 5000); };

@@ -4,6 +4,7 @@ import { setting, setSetting, secret, setSecret, audit, seenOnce, log, redact } 
 import { token, safeEqual } from '../crypto.js';
 import { ownerSaid } from './inbound.js';
 import { decide } from '../approvals.js';
+import { guardOut } from '../outguard.js';
 
 async function api(method, body, tok) {
   const t = tok || secret('telegram_token');
@@ -82,6 +83,8 @@ export async function processUpdate(update) {
 }
 
 export async function sendOwner(text, opts = {}) {
+  text = guardOut(text, 'telegram');           // 2.3.17 (D): tool-call text never leaves
+  if (!String(text ?? '').trim() && !(opts.files && opts.files.length)) return true;
   const chat = setting('telegram_chat_id');
   if (!chat || !secret('telegram_token')) throw new Error('Telegram is not paired');
   const chunks = String(text).match(/[\s\S]{1,3900}/g) || [''];

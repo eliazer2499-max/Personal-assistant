@@ -5,6 +5,7 @@ import { setting, setSetting, secret, setSecret, audit, seenOnce, log, run, now,
 import { token, safeEqual, hmacHex } from '../crypto.js';
 import { ownerSaid } from './inbound.js';
 import { decide } from '../approvals.js';
+import { guardOut } from '../outguard.js';
 
 const G = () => `${cfg.graphBase}/${setting('wa_api_version') || 'v23.0'}`;
 const digits = (s) => String(s || '').replace(/\D/g, '');
@@ -105,6 +106,8 @@ export async function sendWhatsApp(to, text, approvalId, replyTo = '') {
   return { sent: true, id: last?.messages?.[0]?.id };
 }
 export async function sendOwner(text, opts = {}) {
+  text = guardOut(text, 'whatsapp');           // 2.3.17 (D): tool-call text never leaves
+  if (!String(text ?? '').trim() && !(opts.files && opts.files.length)) return true;
   const to = opts.meta?.wa_from || allowList()[0];
   if (!to) throw new Error('No owner WhatsApp number saved');
   return sendWhatsApp(to, text, opts.approvalId, opts.replyTo?.wa_msg_id || '');

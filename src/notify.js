@@ -3,9 +3,12 @@ import { run, get, now, setting, log, redact } from './db.js';
 import { chatOfJob, chatById, mainChatId, touchChat } from './chats.js';
 import { looksLikeReplies, repliesToPlain } from './replies.js';
 import { splitStatusEmoji } from './emoji.js';
+import { guardOut } from './outguard.js';
 
 // 2.3.16: the last guard — the assistant's replies JSON is never stored or sent as text (only its words).
-const plainWords = (role, text) => (role === 'assistant' || role === 'notice') && looksLikeReplies(text) ? repliesToPlain(text).text : text;
+const plainWords0 = (role, text) => (role === 'assistant' || role === 'notice') && looksLikeReplies(text) ? repliesToPlain(text).text : text;
+// 2.3.17 (D): and tool-call text a model wrote as words is never stored or sent either.
+const plainWords = (role, text) => { const t = plainWords0(role, text); return role === 'assistant' || role === 'notice' ? guardOut(t, 'chat') : t; };
 
 /** Store a message. It goes to chatId, else the chat of its job, else the main chat. */
 export function addMessage(role, channel, text, meta = null, jobId = null, chatId = null) {
@@ -25,6 +28,8 @@ export async function deliver(channel, text, opts = {}) {
     // drops it); the other channels already got their reaction from the brain, so the emoji alone is not sent.
     if (channel !== 'whatsapp_agent' && channel !== 'web' && !(opts.files && opts.files.length) && splitStatusEmoji(text).where === 'only') { log('deliver: emoji-only text not sent on', channel); return true; }
   }
+  // 2.3.17 (D): never tool-call text, on any channel (plainWords above already checked the assistant's words)
+  else { text = guardOut(String(text ?? ''), channel); if (!text.trim() && !(opts.files && opts.files.length)) return true; }
   try {
     if (channel === 'telegram') return await (await import('./channels/telegram.js')).sendOwner(text, opts);
     if (channel === 'whatsapp') return await (await import('./channels/whatsapp.js')).sendOwner(text, opts);

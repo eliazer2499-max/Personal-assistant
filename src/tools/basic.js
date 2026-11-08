@@ -3,6 +3,9 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import { all, get, run, now, setting } from '../db.js';
 import { VERSION } from '../config.js';
+// 2.3.17 (E): a web search for a logo picture to put in a site is answered without searching.
+export const LOGO_FILE_SEARCH = (q) => /\blogos?\b/i.test(String(q || '')) && /\b(?:png|svg|jpe?g|webp|ico|image|img|picture|file|download|transparent|vector|hd)\b|\bsite:/i.test(String(q || ''));
+export const LOGO_SEARCH_NOTE = 'Not searched: do not take a logo picture from the web or link one from another site (it shows up broken or is someone else\'s). Make the logo yourself: write an SVG file (logo.svg) in the project — a simple mark or monogram plus the name, in the site\'s colours — and use it with a relative path (src="logo.svg"). If he sent his own logo, use that file.';
 
 export function calc(expr) {
   // Safe arithmetic: numbers, + - * / % ^ ( ), no code runs.
@@ -121,6 +124,9 @@ export default [
   { name: 'web_search', description: 'Search the web (DuckDuckGo results page). Returns titles, links and snippets; fetch a page with web_fetch for detail.',
     params: { query: S('Search words') }, required: ['query'],
     run: async ({ query }) => {
+      // 2.3.17 (E, Abish Nov 8 1:26 AM): it searched "SoftTech logo png site:github.com" and linked the picture into
+      // his page, which showed up broken. A logo for a site is made, not searched for.
+      if (LOGO_FILE_SEARCH(query)) return { results: [], note: LOGO_SEARCH_NOTE };
       const r = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), { signal: AbortSignal.timeout(20000), headers: { 'User-Agent': 'Mozilla/5.0' } });
       const h = await r.text();
       const out = [];

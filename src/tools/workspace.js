@@ -84,11 +84,20 @@ export default [
   { name: 'file_write', description: 'Create or overwrite a text file inside a workspace project (the project is created if new).',
     params: { project: S('Project name, e.g. my-site'), path: S('File path inside the project, e.g. index.html'), content: S('Full file content') },
     required: ['project', 'path', 'content'],
-    run: async ({ project, path: rel, content }) => {
+    run: async ({ project, path: rel, content }, ctx = {}) => {
       const p = inProject(project, rel, true);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, String(content));
-      return { written: path.relative(projectDir(project), p), bytes: Buffer.byteLength(String(content)) };
+      const out = { written: path.relative(projectDir(project), p), bytes: Buffer.byteLength(String(content)) };
+      // 2.3.17 (Abish: "Again, I need the design and the logo" after it added "a logo placeholder"): a real logo is
+      // made, never a placeholder, unless he asked for one. brain.js reads these marks (and nudges once).
+      const { hasLogoPlaceholder, isRealLogoFile, asksForDesign } = await import('../tidy.js');
+      if (isRealLogoFile(rel, content)) { ctx.logoMade = true; }
+      else if (hasLogoPlaceholder(content)) {
+        ctx.placeholderWritten = true;
+        if (asksForDesign(typeof ctx.askedText === 'function' ? ctx.askedText() : (ctx.askedText || ''))) out.warning = 'This file has a logo PLACEHOLDER. He asked for a real logo: write the logo yourself as an SVG (e.g. logo.svg) matching the site name and colours, and use it here instead of the placeholder.';
+      }
+      return out;
     } },
   { name: 'file_read', description: 'Read a text file from a workspace project.',
     params: { project: S('Project name'), path: S('File path') }, required: ['project', 'path'],
@@ -115,6 +124,15 @@ export default [
     params: { project: S('Project name'), folder: S('Built folder inside the project, e.g. dist or . (default .)'), name: S('Site name in the address (letters, numbers, dashes)') },
     required: ['project', 'name'],
     approval: (a) => `Publish project "${a.project}" folder "${a.folder || '.'}" publicly at ${cfg.publicUrl}/sites/${a.name}/`,
+    // 2.3.17 (E, Abish 1:26 AM: a broken "Logo" picture on the page he was asked to OK): checked before the YES request
+    precheck: async ({ project, folder, name }) => {
+      let src; try { src = inProject(project, folder || '.'); } catch (e) { return { error: e.message }; }
+      if (!fs.existsSync(path.join(src, 'index.html'))) return { error: 'That folder has no index.html' };
+      const { precheckSite, FIX_PICTURES } = await import('./sitecheck.js');
+      let siteName = ''; try { siteName = safeName(name, 'site name'); } catch {}
+      const c = await precheckSite(src, { siteName });
+      return c.ok ? null : { error: 'Not filed for his YES yet: the page has problems he would see.', problems: c.problems, fix: FIX_PICTURES };
+    },
     run: async ({ project, folder, name }) => {
       const src = inProject(project, folder || '.');
       if (!fs.existsSync(path.join(src, 'index.html'))) throw new Error('That folder has no index.html');
