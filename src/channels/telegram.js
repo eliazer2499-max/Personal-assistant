@@ -76,7 +76,7 @@ export async function processUpdate(update) {
   if (!owner || chatId !== owner) { log('telegram: ignored message from a chat that is not the owner'); return { status: 200 }; }
   if (!text) { await sendOwner('I can read text messages here (voice and photos are not supported yet).'); return { status: 200 }; }
   api('sendChatAction', { chat_id: owner, action: 'typing' }).catch(() => {});
-  const reply = await ownerSaid('telegram', text);
+  const reply = await ownerSaid('telegram', text, msg.message_id ? { tg_msg_id: msg.message_id } : null);   // 2.3.15: id for reactions
   if (reply) await sendOwner(reply);
   return { status: 200 };
 }
@@ -87,8 +87,18 @@ export async function sendOwner(text, opts = {}) {
   const chunks = String(text).match(/[\s\S]{1,3900}/g) || [''];
   for (let i = 0; i < chunks.length; i++) {
     const body = { chat_id: chat, text: chunks[i], disable_web_page_preview: true };
+    // 2.3.15: an answer to one of several messages is sent as a reply to that message (Telegram shows the quote)
+    if (i === 0 && opts.replyTo?.tg_msg_id) body.reply_parameters = { message_id: Number(opts.replyTo.tg_msg_id), allow_sending_without_reply: true };
     if (opts.approvalId && i === chunks.length - 1) body.reply_markup = { inline_keyboard: [[{ text: '✅ YES', callback_data: `ap:${opts.approvalId}:yes` }, { text: '✖ NO', callback_data: `ap:${opts.approvalId}:no` }]] };
     await api('sendMessage', body);
   }
+  return true;
+}
+
+/** 2.3.15: put one emoji on his Telegram message ('' removes it). Telegram allows a fixed set (reactions.telegramEmoji). */
+export async function react(messageId, emoji) {
+  const chat = setting('telegram_chat_id');
+  if (!chat || !secret('telegram_token')) throw new Error('Telegram is not paired');
+  await api('setMessageReaction', { chat_id: chat, message_id: Number(messageId), reaction: emoji ? [{ type: 'emoji', emoji }] : [] });
   return true;
 }

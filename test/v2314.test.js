@@ -129,8 +129,10 @@ test('version 2.3.14 is newer than 2.3.13 (numbers, not text)', () => {
   assert.equal(updates.cmpVer('2.3.14', '2.3.13'), 1);
   assert.equal(updates.cmpVer('2.3.13', '2.3.14'), -1);
   assert.equal(updates.cmpVer('2.3.14', '2.3.9'), 1);
-  assert.equal(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version, '2.3.14');
-  assert.equal(fs.readFileSync(new URL('../VERSION', import.meta.url), 'utf8').trim(), '2.3.14');
+  // 2.3.15: the version moved on; package.json and VERSION still agree and are not older than 2.3.14
+  const pv = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
+  assert.equal(fs.readFileSync(new URL('../VERSION', import.meta.url), 'utf8').trim(), pv);
+  assert.ok(updates.cmpVer(pv, '2.3.14') >= 0, pv);
 });
 
 // ---------------- 1. Gemini thought signatures ----------------

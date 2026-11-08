@@ -6,7 +6,8 @@ import { cfg, APP_DIR, VERSION } from './config.js';
 import { loadMasterKey } from './crypto.js';
 import { openDb, all, get, run, now, setting, setSetting, allSettings, secret, setSecret, hasSecret, audit, log, redact } from './db.js';
 import * as auth from './auth.js';
-import { startJob, cancelJob, recoverJobs, geminiModels, testKey, testDraft } from './brain.js';
+import { startJob, cancelJob, recoverJobs, geminiModels, testKey, testDraft, batchWait, BATCH_WAIT_DEFAULT } from './brain.js';
+import { reactionsForChat } from './reactions.js';
 import * as aikeys from './aikeys.js';
 import { registerBrowserRoutes } from './browser-web.js';
 import { addMessage } from './notify.js';
@@ -111,7 +112,7 @@ R('GET', /^\/api\/chat$/, (c) => {
   const events = jobs.length ? all(`SELECT * FROM job_events WHERE job_id IN (${jobs.map(j => j.id).join(',')}) ORDER BY id`) : [];
   const ap = all("SELECT id,status FROM approvals WHERE id IN (SELECT json_extract(meta,'$.approval') FROM messages WHERE meta IS NOT NULL ORDER BY id DESC LIMIT 200)");
   const chat = chats.chatById(chatId);
-  return { chat: { id: chat.id, title: chat.title, main: chat.id === chats.mainChatId() }, messages: msgs.map(m => ({ id: m.id, role: m.role, channel: m.channel, text: m.text, meta: m.meta ? JSON.parse(m.meta) : null, job_id: m.job_id, ts: m.ts, files: fmap[m.id] || undefined })), jobs, events, approval_status: Object.fromEntries(ap.map(a => [a.id, a.status])), pending: approvals.pending().length };
+  return { chat: { id: chat.id, title: chat.title, main: chat.id === chats.mainChatId() }, messages: msgs.map(m => ({ id: m.id, role: m.role, channel: m.channel, text: m.text, meta: m.meta ? JSON.parse(m.meta) : null, job_id: m.job_id, ts: m.ts, files: fmap[m.id] || undefined })), jobs, events, approval_status: Object.fromEntries(ap.map(a => [a.id, a.status])), pending: approvals.pending().length, reactions: reactionsForChat(chatId) };   // 2.3.15: reactions on his messages
 });
 R('POST', /^\/api\/chat$/, (c) => {
   const text = String(c.body.text || '').trim();
@@ -137,10 +138,11 @@ R('GET', /^\/api\/audit$/, (c) => {
 });
 
 // settings / brain
-const PLAIN_KEYS = ['assistant_name', 'provider', 'model', 'openai_base_url', 'openai_model', 'max_steps', 'max_minutes', 'max_parallel', 'image_model', 'update_repo', 'history_messages', 'timezone', 'notify_channel', 'morning_summary', 'morning_time', 'continue_after_approval', 'update_url', 'update_source', 'backup_keep', 'backup_drive_account', 'owner_emails'];
+const PLAIN_KEYS = ['assistant_name', 'provider', 'model', 'openai_base_url', 'openai_model', 'max_steps', 'max_minutes', 'max_parallel', 'image_model', 'update_repo', 'history_messages', 'timezone', 'notify_channel', 'morning_summary', 'morning_time', 'continue_after_approval', 'update_url', 'update_source', 'backup_keep', 'backup_drive_account', 'owner_emails', 'reactions', 'batch_wait_ms'];
 R('GET', /^\/api\/settings$/, () => {
   const s = allSettings(); const o = {};
   for (const k of PLAIN_KEYS) o[k] = s[k];
+  o.batch_wait_ms = String(batchWait()); o.batch_wait_default = String(BATCH_WAIT_DEFAULT); o.reactions = setting('reactions');   // 2.3.15
   return { settings: o, has_gemini_key: aikeys.geminiKeys().length > 0, has_openai_key: hasSecret('openai_api_key'), tools: tools.toolList(), version: VERSION };
 });
 R('POST', /^\/api\/settings$/, (c) => {
@@ -157,6 +159,8 @@ R('POST', /^\/api\/settings$/, (c) => {
       if (v === normalizeSource(cfg.updateSource)) v = '';
       if (v !== setting('update_source')) { audit('owner', 'update.source', v || 'default (' + cfg.updateSource + ')'); setSetting('update_available', ''); }
     }
+    if (k === 'reactions') v = /^(0|off|false|no)$/i.test(v) ? '0' : '1';   // 2.3.15
+    if (k === 'batch_wait_ms') { const n = parseInt(v, 10); if (!(n >= 0 && n <= 10000)) throw auth.httpErr(400, 'Wait for more messages: 0 to 10 seconds'); v = String(n); }
     if (k === 'max_parallel') { const n = parseInt(v, 10); if (!(n >= 1 && n <= 6)) throw auth.httpErr(400, 'Jobs at the same time: 1 to 6'); v = String(n); }
     if (k === 'image_model' && v && !/^[a-z0-9][a-z0-9.\-]*$/i.test(v)) throw auth.httpErr(400, 'Model names look like gemini-3.1-flash-image');
     if (k === 'update_repo') { v = v.replace(/^https:\/\/github\.com\//i, '').replace(/\.git$/, '').replace(/\/+$/, ''); if (v && !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(v)) throw auth.httpErr(400, 'Update source: a GitHub repo like owner/name, or blank for the default'); if (v !== setting('update_repo')) { audit('owner', 'update.source', v || 'default'); setSetting('update_available', ''); } }

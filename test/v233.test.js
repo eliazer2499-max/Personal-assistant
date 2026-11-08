@@ -181,17 +181,20 @@ test('the 12-a-minute budget: when it is full the reaction is skipped (not waite
   await sleep(2100);
 });
 
-test('AI tool react: not available outside WhatsApp Agent; bad emoji refused; prompt guidance only on WhatsApp', async () => {
+test('AI tool react: needs a message of his to react to; on the web chat it reacts there (2.3.15); bad emoji refused; WhatsApp guidance only on WhatsApp', async () => {
   const ex = (args, ctx) => tools.execTool('react', args, { actor: 'assistant', chatId: chats.mainChatId(), jobId: null, ...ctx });
   const before = AP.sent.length;
   for (const ch of ['web', 'telegram', 'system']) assert.match((await ex({ emoji: '❤️' }, { channel: ch })).error, /^Not available here/);
+  // 2.3.15: from the web chat the react tool now works: the ❤️ goes on his web bubble (not to WhatsApp)
   const j = await ask('REACT ❤️');                                        // from the web chat, through the model
-  assert.match(j.result, /Not available here/);
+  assert.match(j.result, /"reacted":"❤️"/);
+  const own = db.get("SELECT id FROM messages WHERE role='owner' AND text='REACT ❤️' ORDER BY id DESC LIMIT 1");
+  assert.equal(db.get('SELECT emoji FROM reactions WHERE message_id=?', own.id)?.emoji, '❤️');
   for (const bad of ['abc', '👍👍', 'x'.repeat(40), '<b>']) assert.match((await ex({ emoji: bad }, { channel: 'whatsapp_agent', meta: { waa_wamid: 'wamid.zz' } })).error, /Reaction not sent: Give/);
   assert.match((await ex({}, { channel: 'whatsapp_agent' })).error, /Missing "emoji"/);
   assert.equal(AP.sent.length, before, 'none of these reached WhatsApp');
   assert.ok(tools.toolList().some(t => t.name === 'react'), 'listed under Settings → Tools');
   const brain = await import('../src/brain.js');
   assert.match(brain.systemPrompt('whatsapp_agent'), /react tool .*Use it sparingly/);
-  assert.doesNotMatch(brain.systemPrompt('web'), /react tool/);
+  assert.doesNotMatch(brain.systemPrompt('web'), /On WhatsApp/);   // 2.3.15: web gets its own reactions guide, not the WhatsApp one
 });

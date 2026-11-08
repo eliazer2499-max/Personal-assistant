@@ -90,7 +90,7 @@ async function call(p, body) {
   const text = await r.text(); let j = null; try { j = JSON.parse(text); } catch {}
   return { status: r.status, j, text };
 }
-const jobs = () => db.get('SELECT COUNT(*) AS n FROM jobs').n;
+const jobs = () => db.get("SELECT COUNT(*) AS n FROM jobs WHERE channel != 'system'").n;   // 2.3.15: the automatic morning summary can start on its own when the test runs after 07:30 — it is not a replayed message
 const sentTexts = () => AP.sent.filter(s => s.type === 'text').map(s => s.text.body);
 const RESPONSES = [];   // every API answer body we read, checked for the key at the end
 const callR = async (...a) => { const r = await call(...a); RESPONSES.push(r.text); return r; };

@@ -243,7 +243,8 @@ test('prompt: Natural and Every message carry the no-lone-emoji rule; Off and we
   }
   await call('/api/wa-agent/react', { mode: 'off' });
   assert.ok(!brain.systemPrompt('whatsapp_agent').includes(rule));
-  assert.ok(!brain.systemPrompt('web').includes(rule));
+  db.setSetting('reactions', '0'); assert.ok(!brain.systemPrompt('web').includes(rule), 'web, reactions off');   // 2.3.15: web reacts too when on
+  db.setSetting('reactions', '1'); assert.ok(brain.systemPrompt('web').includes(rule), 'web, reactions on');
   await call('/api/wa-agent/react', { mode: 'natural' });
   const decl = tools.declarations({}).find(t => t.name === 'react');
   assert.ok(decl, 'react is offered to the model');

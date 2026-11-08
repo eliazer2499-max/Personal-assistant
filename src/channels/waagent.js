@@ -31,7 +31,8 @@ import { ownerSaid } from './inbound.js';
 import { addMessage } from '../notify.js';
 import { mainChatId } from '../chats.js';
 import * as files from '../files.js';
-import { splitStatusEmoji } from '../emoji.js';
+import { splitStatusEmoji, cleanEmoji } from '../emoji.js';
+import { mirrorWaReaction } from '../reactions.js';
 
 export const CHANNEL = 'whatsapp_agent';
 export const VAULT_NAME = 'whatsapp-agent';
@@ -209,15 +210,8 @@ export const REACT_MODES = ['natural', 'every', 'off'];
 export const reactMode = () => { const m = setting('wa_agent_react_mode'); return REACT_MODES.includes(m) ? m : 'natural'; };
 export const reactEnabled = () => reactMode() === 'every';   // the automatic reaction
 export const reactEmoji = () => { const e = setting('wa_agent_react_emoji'); return REACT_CHOICES.includes(e) ? e : '👍'; };
-/** One emoji, or '' (removes our reaction). */
-export function cleanEmoji(e) {
-  const s = String(e ?? '').trim();
-  if (!s) return '';
-  if (s.length > 16 || /[\s<>"'`\\]/.test(s) || /^[\x20-\x7e]+$/.test(s)) throw Object.assign(new Error('Give one emoji, like 👍 ❤️ 😂 ✅ (or empty to remove the reaction).'), { kind: 'bad_emoji' });
-  let n = 0; try { n = [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(s)].length; } catch { n = 1; }
-  if (n !== 1) throw Object.assign(new Error('Give exactly one emoji.'), { kind: 'bad_emoji' });
-  return s;
-}
+/** One emoji, or '' (removes our reaction). 2.3.15: lives in emoji.js now (shared with the other channels). */
+export { cleanEmoji };
 /**
  * React to one of his WhatsApp messages with an emoji ('' removes our reaction). Same /messages endpoint, auth,
  * error handling and 12-a-minute budget as text. Never waits for the budget: if it is full the reaction is skipped,
@@ -231,6 +225,7 @@ export async function reactTo(wamid, emoji) {
   if (!enabled() || !hasKey() || !to) throw new WaErr('off', 'WhatsApp Agent is not connected');
   if (limits.messages.delay() > 0) throw new WaErr('rate', 'skipped: WhatsApp\'s 12-a-minute limit is full right now');
   await postMessage({ to, type: 'reaction', reaction: { message_id: id, emoji: e } }, { needId: false });
+  try { mirrorWaReaction(id, e); } catch (err) { log('wa agent react mirror', err.message); }   // 2.3.15: the web chat shows it too
   return e;
 }
 /** Automatic reaction when one of his messages is accepted (Reactions = "Every message" only). */
@@ -461,6 +456,15 @@ async function drain() {
           if (plan.kind === 'document') obj.filename = plan.name;
           if (it.caption && plan.kind !== 'audio') obj.caption = String(it.caption).slice(0, 1024);
           id = await postMessage({ to: it.to, type: plan.kind, [plan.kind]: obj });
+        } else if (it.context) {
+          // 2.3.15: a reply to one of his messages (quoted). If WhatsApp refuses the quote, the words still go, unquoted.
+          try { id = await postMessage({ to: it.to, type: 'text', text: { body: it.text }, context: { message_id: it.context } }); }
+          catch (e) {
+            if (e.kind !== 'rejected') throw e;
+            log('wa agent: quote refused, sending without it', e.message);
+            it.context = '';
+            id = await postMessage({ to: it.to, type: 'text', text: { body: it.text } });
+          }
         } else id = await postMessage({ to: it.to, type: 'text', text: { body: it.text } });
         queue.shift();
         setSetting('wa_agent_last_out', String(now()));
@@ -542,7 +546,8 @@ export async function sendOwner(text, opts = {}) {
   const net = await moveStatusEmoji(text, opts.meta?.waa_wamid, { taskDone: !!opts.taskDone });
   if (net.reacted && net.text === null) return true;           // the whole reply was an emoji: it went as a reaction
   text = net.text ?? text;
-  const jobs = splitText(toWhatsApp(text)).map(c => enqueue({ type: 'text', to, text: c }));
+  const quote = String(opts.replyTo?.waa_wamid || '');     // 2.3.15: reply to (quote) that message of his
+  const jobs = splitText(toWhatsApp(text)).map((c, i) => enqueue({ type: 'text', to, text: c, context: i === 0 ? quote : '' }));
   // 2.3.7: Natural mode, a real request that finished well → ✅ on his message, queued right after the words (not awaited).
   if (opts.taskDone) Promise.resolve(jobs[0]).catch(() => {}).finally(() => taskDone(opts.meta?.waa_wamid));
   for (const f of opts.files || []) {

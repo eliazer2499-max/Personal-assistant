@@ -445,8 +445,27 @@ function addBubble(m, approvalStatus) {
     const voiceOnly = files.length && !m.text;
     const allVoice = files.length && (m.files || []).every(f => f.kind === 'audio');
     log.append(h('div', { class: 'bubble ' + (m.role === 'owner' ? 'owner' : m.role === 'assistant' ? 'assistant' : 'notice') + (files.length ? ' hasfiles' : '') + (allVoice && voiceOnly ? ' voice' : ''), 'data-msg': m.id || null },
+      m.role === 'assistant' && m.meta && m.meta.reply_to ? quoteEl(m.meta) : null,
       files, voiceOnly ? null : (m.text ? h('div', { class: 'btext' }, shownText(m)) : null), via));
   }
+}
+// 2.3.15: an answer to one of several messages shows which one it answers (a quote, like a reply in a messenger).
+// Tapping the quote scrolls to his message and flashes it.
+function quoteEl(meta) {
+  return h('div', { class: 'quote', role: 'button', tabindex: '0', title: 'Reply to your message', onclick: () => {
+    const t = document.querySelector('.bubble.owner[data-msg="' + Number(meta.reply_to) + '"]');
+    if (t) { t.scrollIntoView({ behavior: 'smooth', block: 'center' }); t.classList.remove('flash'); void t.offsetWidth; t.classList.add('flash'); }
+  } }, String(meta.quote || ''));
+}
+// 2.3.15: the assistant's reaction on his message, in the corner of his bubble (like a tapback).
+function paintReactions(log, map) {
+  log.querySelectorAll('.bubble.owner[data-msg]').forEach(b => {
+    const e = map[b.dataset.msg] || '';
+    let r = b.querySelector('.react');
+    if (!e) { if (r) { r.remove(); b.classList.remove('reacted'); } return; }
+    if (!r) { r = h('span', { class: 'react', role: 'img' }); b.append(r); b.classList.add('reacted'); }
+    if (r.textContent !== e) { r.textContent = e; r.setAttribute('aria-label', 'Reacted ' + e); r.classList.remove('pop'); void r.offsetWidth; r.classList.add('pop'); }
+  });
 }
 function approvalCard(a, inChat) {
   const out = msgEl();
@@ -480,6 +499,12 @@ function renderJob(j, events) {
     return;
   }
   if (!active) { el?.remove(); return; }
+  // 2.3.15: waiting a few seconds in case he sends more → just the "typing" dots, no job card
+  if (j.status === 'queued' && j.progress === 'Waiting for more messages') {
+    const dots = h('div', { class: 'bubble assistant typing', 'data-job': j.id, 'aria-label': 'Typing' }, h('span'), h('span'), h('span'));
+    if (el) el.replaceWith(dots); else log.append(dots);
+    return;
+  }
   const evs = events.filter(e => e.job_id === j.id && ['tool', 'result', 'error', 'approval', 'note'].includes(e.kind));
   const list = h('ol', {}, evs.filter(e => e.kind !== 'result').slice(-12).map(e => e.kind === 'tool' ? h('li', { class: 'tool' }, h('b', {}, e.text.split(' ')[0]), ' ' + e.text.split(' ').slice(1).join(' ').slice(0, 140)) : h('li', { class: e.kind === 'error' ? 'err' : e.kind === 'approval' ? 'ap' : '' }, e.kind === 'approval' ? 'Waiting for your OK (see card)' : e.text.slice(0, 200))));
   const stop = h('button', { class: 'small', onclick: async () => { stop.disabled = true; await api('/api/jobs/' + j.id + '/cancel', {}); } }, 'Stop');
@@ -506,7 +531,8 @@ async function refreshChat(scroll) {
   }
   for (const m of r.messages) { addBubble(m, r.approval_status); lastMsgId = Math.max(lastMsgId, m.id); }
   // keep job cards at the bottom; parents before their helpers
-  log.querySelectorAll('.job').forEach(n => log.append(n));
+  paintReactions(log, r.reactions || {});   // 2.3.15
+  log.querySelectorAll('.job, .typing').forEach(n => log.append(n));
   for (const j of r.jobs.slice().reverse()) renderJob(j, r.events);
   for (const [id, st] of Object.entries(r.approval_status || {})) { const c = log.querySelector(`[data-ap="${id}"]`); if (c && st !== 'pending' && c.querySelector('.row')) { c.querySelector('.row').replaceWith(h('span', { class: 'pill' + (st === 'done' ? ' ok' : '') }, st)); } }
   PENDING = r.pending; updateBadge();
@@ -677,6 +703,23 @@ function whoDoesWhat(keys) {
   });
 }
 
+// 2.3.15: Replies — reactions on his messages, and waiting for more before answering
+function repliesSection(s) {
+  const out = msgEl();
+  const rx = h('select', { id: 'rx' }, h('option', { value: '1' }, 'On (default)'), h('option', { value: '0' }, 'Off — always words'));
+  rx.value = s.reactions === '0' ? '0' : '1';
+  const def = String(s.batch_wait_default || '3500');
+  const opts = [['2000', 'Wait 2 seconds'], ['3500', 'Wait 3.5 seconds'], ['5000', 'Wait 5 seconds'], ['8000', 'Wait 8 seconds'], ['0', 'Off — answer each message']].map(([v, t]) => h('option', { value: v }, t + (v === def ? ' (default)' : '')));
+  const bw = h('select', { id: 'bw' }, opts);
+  bw.value = opts.some(o => o.value === String(s.batch_wait_ms)) ? String(s.batch_wait_ms) : def;
+  return h('section', { class: 'bsec', id: 'replies' }, h('h2', { class: 'grouphead' }, 'Replies'),
+    h('div', { class: 'card' },
+      h('label', { for: 'rx', style: 'margin-top:0' }, 'Reactions'), rx,
+      h('p', { class: 'fine' }, 'Puts 👍 ❤️ 😂 ✅ on your message when it fits. A “thanks” or “ok” gets just a reaction, no words. Shows here, on Telegram and on WhatsApp.'),
+      h('label', { for: 'bw' }, 'Several messages in a row'), bw,
+      h('p', { class: 'fine' }, 'Waits until you stop typing (never more than 15 seconds), then answers: separate questions get separate replies, each one replying to its own message; a message that only adds to or fixes an earlier one goes into that answer. A message you add while it is working is handled the same way.'),
+      h('button', { class: 'primary', style: 'width:100%;margin-top:6px', onclick: (e) => act(e.target, out, () => api('/api/settings', { reactions: rx.value, batch_wait_ms: bw.value }), 'Saved.') }, 'Save replies'), out));
+}
 async function brainView(body) {
   const r = await api('/api/settings'); const s = r.settings;
   const keysSec = h('section', { id: 'aikeys', class: 'bsec' }), whoSec = h('section', { class: 'bsec', id: 'whowhat' });
@@ -694,6 +737,7 @@ async function brainView(body) {
         h('label', { for: 'imodel' }, 'Picture model'), imodel,
         h('p', { class: 'fine' }, 'For “make a picture of…”. Uses the Gemini keys set to Pictures first.'),
         h('button', { class: 'primary', style: 'width:100%;margin-top:6px', onclick: (e) => act(e.target, outM, () => api('/api/settings', { model: model.value, image_model: imodel.value }), 'Saved.').then(() => paintKeys()) }, 'Save models'), outM)),
+    repliesSection(s),
     h('section', { class: 'bsec', id: 'limits' }, h('h2', { class: 'grouphead' }, 'Limits'),
       h('div', { class: 'card' },
         h('div', { class: 'row2' }, h('div', {}, h('label', { for: 'steps', style: 'margin-top:0' }, 'Max steps per job'), steps), h('div', {}, h('label', { for: 'mins', style: 'margin-top:0' }, 'Max minutes per job'), mins)),

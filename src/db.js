@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, channel 
 CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, ts INTEGER);
 CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, created INTEGER, updated INTEGER);
 CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT, mime TEXT, size INTEGER, kind TEXT, created INTEGER, chat_id INTEGER, message_id INTEGER);
+CREATE TABLE IF NOT EXISTS reactions (message_id INTEGER PRIMARY KEY, emoji TEXT, ts INTEGER, auto INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_msg_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_ev_job ON job_events(job_id);
 CREATE INDEX IF NOT EXISTS idx_ap_status ON approvals(status);
@@ -109,6 +110,8 @@ export const DEFAULTS = {
   max_minutes: '60',                // longest a single job may run
   history_messages: '16',
   max_parallel: '3',                // jobs at the same time (1-6)
+  reactions: '1',                   // 2.3.15: the assistant may put an emoji on his messages (web chat, Telegram, WhatsApp number)
+  // 2.3.15: batch_wait_ms (no default row): quiet time after his last message before answering; see brain.batchWait()
   image_model: 'gemini-3.1-flash-image', // picture creation (Gemini image model)
   update_repo: '',                  // blank = release site; or a GitHub repo owner/name
   timezone: 'America/New_York',

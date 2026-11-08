@@ -27,7 +27,7 @@ export function schedules() {
   for (const s of due) {
     if (s.every_minutes > 0) { let n = s.next_run; while (n <= now()) n += s.every_minutes * 60000; run('UPDATE schedules SET next_run=? WHERE id=?', n, s.id); }
     else run('UPDATE schedules SET active=0 WHERE id=?', s.id);
-    startJob({ text: `[Scheduled job ${s.id}, set up earlier by the owner] ${s.prompt}\nWhen done, send the result to the owner with notify_me only if there is something worth telling.`, channel: 'system', hidden: true, title: 'Scheduled: ' + s.prompt.slice(0, 80) });
+    startJob({ text: `[Scheduled job ${s.id}, set up earlier by the owner] ${s.prompt}\nWhen done, send the result to the owner with notify_me only if there is something worth telling. If there is nothing new to report, do not message him: answer exactly NO_REPLY.`, channel: 'system', hidden: true, title: 'Scheduled: ' + s.prompt.slice(0, 80) });
   }
   return due.length;
 }

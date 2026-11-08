@@ -83,13 +83,13 @@ export async function processBody(body) {
       }
       if (!allow.includes(from)) { run('INSERT INTO inbox(channel,sender,text,ts) VALUES(?,?,?,?)', 'whatsapp', from, text || '(' + m.type + ')', now()); continue; }
       if (!text) { await sendWhatsApp(from, 'I can read text messages here (voice notes and photos are not supported yet).').catch(() => {}); continue; }
-      const reply = await ownerSaid('whatsapp', text, { wa_from: from });
+      const reply = await ownerSaid('whatsapp', text, { wa_from: from, wa_msg_id: m.id });   // 2.3.15: id for reactions
       if (reply) await sendWhatsApp(from, reply).catch(e => log('wa send', e.message));
     }
   }
 }
 
-export async function sendWhatsApp(to, text, approvalId) {
+export async function sendWhatsApp(to, text, approvalId, replyTo = '') {
   const pid = setting('wa_phone_number_id');
   if (!pid || !secret('wa_token')) throw new Error('WhatsApp is not set up');
   const chunks = String(text).match(/[\s\S]{1,3800}/g) || [''];
@@ -99,6 +99,7 @@ export async function sendWhatsApp(to, text, approvalId) {
     const body = approvalId && isLast
       ? { messaging_product: 'whatsapp', to: digits(to), type: 'interactive', interactive: { type: 'button', body: { text: chunks[i].slice(0, 1000) }, action: { buttons: [{ type: 'reply', reply: { id: `ap:${approvalId}:yes`, title: 'YES' } }, { type: 'reply', reply: { id: `ap:${approvalId}:no`, title: 'NO' } }] } } }
       : { messaging_product: 'whatsapp', to: digits(to), type: 'text', text: { body: chunks[i], preview_url: false } };
+    if (i === 0 && replyTo) body.context = { message_id: String(replyTo) };   // 2.3.15: a reply to his message (quoted)
     last = await graph('POST', `/${pid}/messages`, body);
   }
   return { sent: true, id: last?.messages?.[0]?.id };
@@ -106,5 +107,15 @@ export async function sendWhatsApp(to, text, approvalId) {
 export async function sendOwner(text, opts = {}) {
   const to = opts.meta?.wa_from || allowList()[0];
   if (!to) throw new Error('No owner WhatsApp number saved');
-  return sendWhatsApp(to, text, opts.approvalId);
+  return sendWhatsApp(to, text, opts.approvalId, opts.replyTo?.wa_msg_id || '');
+}
+
+/** 2.3.15: put one emoji on his WhatsApp message ('' removes it), the Cloud API's reaction message. */
+export async function react(to, messageId, emoji) {
+  const pid = setting('wa_phone_number_id');
+  if (!pid || !secret('wa_token')) throw new Error('WhatsApp is not set up');
+  const num = digits(to || allowList()[0] || '');
+  if (!num) throw new Error('No owner WhatsApp number saved');
+  await graph('POST', `/${pid}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to: num, type: 'reaction', reaction: { message_id: String(messageId), emoji: emoji || '' } });
+  return true;
 }

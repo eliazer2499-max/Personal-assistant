@@ -37,7 +37,7 @@ async function idle(ms = 8000) {
   while (Date.now() < end) { const r = await call('/api/chat'); if (!r.j.jobs.some(j => ['queued', 'running', 'cancelling'].includes(j.status))) return r.j; await sleep(100); }
   throw new Error('jobs did not finish');
 }
-const lastAssistant = (j) => j.messages.filter(m => m.role === 'assistant').pop()?.text || '';
+const lastAssistant = (j) => j.messages.filter(m => m.role === 'assistant' && m.channel !== 'system').pop()?.text || '';   // 2.3.15: the automatic morning summary (channel system) can land in between when the tests run after 07:30
 
 // ---- optional local sshd for ssh_run tests ----
 let sshd = null; const SSHP = PORT + 1;
@@ -208,7 +208,7 @@ test('WhatsApp: verify handshake, signature required, only allow-listed number',
   assert.equal((await fetch(BASE + '/hook/whatsapp', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hub-Signature-256': 'sha256=bad' }, body })).status, 403);
   assert.equal((await fetch(BASE + '/hook/whatsapp', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hub-Signature-256': sig }, body })).status, 200);
   await idle(8000); await sleep(200);
-  assert.match(fake.state.waSent.at(-1).text.body, /That is 42/);
+  assert.match(fake.state.waSent.filter(x => x.type === 'text').at(-1).text.body, /That is 42/);   // 2.3.15: a 👍/✅ task reaction may come after it
   const body2 = JSON.stringify({ entry: [{ changes: [{ value: { messages: [{ id: 'w2', from: '15550009999', type: 'text', text: { body: 'hello stranger' } }] } }] }] });
   const n = fake.state.waSent.length;
   await fetch(BASE + '/hook/whatsapp', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hub-Signature-256': 'sha256=' + crypto.createHmac('sha256', 'appsecret123').update(body2).digest('hex') }, body: body2 });

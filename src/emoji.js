@@ -51,3 +51,26 @@ export function withoutStatusEmoji(text) {
   const r = splitStatusEmoji(text);
   return r.where && r.where !== 'only' ? r.text : String(text ?? '');
 }
+
+/**
+ * 2.3.15 (moved here from channels/waagent.js, same rules): one emoji, or '' (removes a reaction). Throws a short
+ * plain-words error (kind 'bad_emoji') for anything that is not exactly one emoji.
+ */
+export function cleanEmoji(e) {
+  const s = String(e ?? '').trim();
+  if (!s) return '';
+  if (s.length > 16 || /[\s<>"'`\\]/.test(s) || /^[\x20-\x7e]+$/.test(s)) throw Object.assign(new Error('Give one emoji, like 👍 ❤️ 😂 ✅ (or empty to remove the reaction).'), { kind: 'bad_emoji' });
+  let n = 0; try { n = [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(s)].length; } catch { n = 1; }
+  if (n !== 1) throw Object.assign(new Error('Give exactly one emoji.'), { kind: 'bad_emoji' });
+  return s;
+}
+
+/**
+ * 2.3.15: the AI's way of saying "a reaction says it all, send no words": an empty answer or the marker NO_REPLY
+ * (also "(no reply)", "[NO_REPLY]", "no_reply."). Anything with real words is a reply.
+ */
+export const NO_REPLY = 'NO_REPLY';
+export function isNoReply(text) {
+  const s = String(text ?? '').trim();
+  return !s || /^[\[(]?\s*no[ _-]?reply\s*[\])]?\.?$/i.test(s);
+}

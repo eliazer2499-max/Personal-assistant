@@ -196,5 +196,5 @@ test('prompt: Natural tells the AI to react like a friend texting; Every keeps t
   await call('/api/wa-agent/react', { mode: 'natural' });
   p = brain.systemPrompt('whatsapp_agent');
   for (const re of [/most messages get no reaction/, /👍 when he gives you a task that will take a while/, /❤️ for thanks or good news/, /😂 for something funny/, /✅ when a task he asked for is done/, /🙏 for an apology or a favour/, /Never react to every message/, /twice in a row/, /never react instead of answering a question/, /about 1 in 3/]) assert.match(p, re);
-  assert.doesNotMatch(brain.systemPrompt('web'), /react tool/);
+  assert.doesNotMatch(brain.systemPrompt('web'), /On WhatsApp you can put an emoji reaction/);   // 2.3.15: web has its own reactions guide
 });
