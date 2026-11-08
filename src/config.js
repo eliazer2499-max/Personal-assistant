@@ -41,6 +41,13 @@ export const cfg = {
   waAgentMinIntervalMs: env.MA_WA_AGENT_MIN_INTERVAL_MS ? parseInt(env.MA_WA_AGENT_MIN_INTERVAL_MS, 10) : undefined,
   waAgentWindowMs: env.MA_WA_AGENT_WINDOW_MS ? parseInt(env.MA_WA_AGENT_WINDOW_MS, 10) : 60000,
   waAgentBackoffMs: env.MA_WA_AGENT_BACKOFF_MS ? parseInt(env.MA_WA_AGENT_BACKOFF_MS, 10) : 2000,
+  // 2.3.19: Settings → Main address. The other addresses this server answers on (installer: MA_EXTRA_DOMAINS), the
+  // web server's file (to see hosts added there by hand), and where to learn this server's public IP. Test knobs only in test mode.
+  extraDomains: (env.MA_EXTRA_DOMAINS || '').split(',').map(s => s.trim()).filter(Boolean),
+  caddyFile: env.MA_CADDYFILE || '/etc/caddy/Caddyfile',
+  ipEcho: env.MA_IP_ECHO !== undefined ? env.MA_IP_ECHO : (env.MA_TEST_MODE === '1' ? '' : 'https://api.ipify.org'),
+  testDns: env.MA_TEST_MODE === '1' && env.MA_TEST_DNS ? JSON.parse(env.MA_TEST_DNS) : null,
+  testProbe: env.MA_TEST_MODE === '1' && env.MA_TEST_PROBE ? JSON.parse(env.MA_TEST_PROBE) : null,
   waAgentConflictMs: env.MA_WA_AGENT_CONFLICT_MS ? parseInt(env.MA_WA_AGENT_CONFLICT_MS, 10) : 60000,
 };
 export function isHttps() { return cfg.publicUrl.startsWith('https://'); }

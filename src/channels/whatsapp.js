@@ -53,6 +53,16 @@ export async function setup(o) {
   return { ok: true, steps };
 }
 
+// 2.3.19: after the main address changed, tell Meta the new webhook address (only possible with App ID + App secret).
+export async function resync() {
+  if (!secret('wa_token') || !setting('wa_app_id') || !secret('wa_app_secret')) return '';
+  const appTok = setting('wa_app_id') + '|' + secret('wa_app_secret');
+  const p = new URLSearchParams({ object: 'whatsapp_business_account', callback_url: cfg.publicUrl + '/hook/whatsapp', verify_token: verifyToken(), fields: 'messages', access_token: appTok });
+  const r = await fetch(`${G()}/${setting('wa_app_id')}/subscriptions`, { method: 'POST', body: p, signal: AbortSignal.timeout(30000) });
+  audit('system', 'whatsapp.webhook', r.ok ? 'moved' : 'failed ' + r.status);
+  return r.ok ? 'WhatsApp webhook moved' : 'WhatsApp webhook move failed (' + r.status + ')';
+}
+
 export function verifyGet(q) {
   if (q['hub.mode'] === 'subscribe' && secret('wa_verify_token') && safeEqual(q['hub.verify_token'] || '', secret('wa_verify_token'))) return { status: 200, body: String(q['hub.challenge'] || '') };
   return { status: 403, body: 'no' };

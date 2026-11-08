@@ -23,6 +23,7 @@ import { appKey, sshExec } from './tools/ssh.js';
 import { seal } from './crypto.js';
 import { startScheduler, backupNow } from './scheduler.js';
 import * as updates from './updates.js';
+import * as address from './address.js';
 import { normalizeSource, label as srcLabel } from './release-source.js';
 import * as chats from './chats.js';
 import * as files from './files.js';
@@ -320,6 +321,10 @@ R('GET', /^\/api\/update$/, () => { const list = updates.updateSources(); return
   source: setting('update_source'), source_default: cfg.updateSource, sources: list.map(srcLabel), checked_from: setting('update_checked_from'), log: updates.updateLog() }; });
 R('POST', /^\/api\/update\/check$/, async () => updates.checkUpdate(true));
 R('POST', /^\/api\/update\/apply$/, () => updates.applyUpdate());
+// 2.3.19: Settings → Main address (signed in = the owner; every POST also needs the session's CSRF header)
+R('GET', /^\/api\/address$/, () => address.addressInfo());
+R('POST', /^\/api\/address\/check$/, async (c) => address.checkAddress(c.body.address));
+R('POST', /^\/api\/address\/switch$/, async (c) => address.switchAddress(c.body.address, c.body.confirm));
 R('POST', /^\/api\/backup\/now$/, () => ({ file: path.basename(backupNow()) }));
 R('GET', /^\/api\/backups$/, () => { const d = path.join(cfg.dataDir, 'backups'); let f = []; try { f = fs.readdirSync(d).filter(x => x.endsWith('.db')).sort().reverse(); } catch {} return { backups: f, dir: d }; });
 R('POST', /^\/api\/password$/, (c) => { auth.changePassword(c.ip, c.body); return { ok: true }; });
@@ -332,6 +337,9 @@ async function handle(req, res) {
   const ip = auth.clientIp(req);
   try {
     if (p === '/healthz') return send(res, 200, { ok: true, version: VERSION });
+    // 2.3.19: "does this address reach this same assistant?" — answers only the one-time code this server just made
+    const am = /^\/api\/address-check\/([A-Za-z0-9]{1,40})$/.exec(p);
+    if (am && req.method === 'GET') { const a = address.nonceAnswer(am[1]); return a ? send(res, 200, a) : send(res, 404, { error: 'Not found' }); }
 
     // Webhooks (each verifies its own secret)
     if (p === '/hook/telegram' && req.method === 'POST') { const r = await telegram.handle(json(await readBody(req, 1e6)), req.headers); return send(res, r.status, { ok: r.status === 200 }); }
@@ -418,6 +426,8 @@ export function start() {
   server.listen(cfg.port, cfg.host, () => log(`My Assistant ${VERSION} listening on ${cfg.host}:${cfg.port} — ${cfg.publicUrl}`));
   const timer = startScheduler();
   try { waagent.start(); } catch (e) { log('wa agent start', e.message); }
+  // 2.3.19: after a switch of the main address, the webhooks follow it (Telegram is asked at every start)
+  setTimeout(() => { address.syncAfterStart({ telegram, sms, whatsapp }).then(st => { if (st.length) log('address:', st.join(' | ')); }).catch(e => log('address sync', e.message)); }, cfg.testMode ? 50 : 3000).unref();
   server.on('close', () => waagent.stop(true));
   const stop = () => { clearInterval(timer); waagent.stop(true); server.close(); setTimeout(() => process.exit(0), 500); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);

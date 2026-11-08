@@ -11,6 +11,8 @@
 #   MA_RELEASE_BASE=https://…  the release site, the last fallback (given explicitly = download from it directly)
 #   DRY_RUN=1                  print what would be done, change nothing (MA_RENDER_DIR=/tmp/x also writes the files there to inspect)
 #   MA_UPDATE=1                update the app only (keeps data, settings, domain)
+#   MA_ADDRESS_ONLY=1          2.3.19: only change the address (env file + web server config) and restart; used by
+#                              Settings → Main address through the update unit. A new MA_DOMAIN keeps the old one as extra.
 # Safe to run again: it keeps your data, keys and settings.
 set -Eeuo pipefail
 
@@ -31,6 +33,9 @@ ETC=/etc/myassistant
 PORT=8787
 DRY="${DRY_RUN:-0}"
 UPDATE="${MA_UPDATE:-0}"
+ADDR_ONLY="${MA_ADDRESS_ONLY:-0}"
+# 2.3.19: a dry run with MA_RENDER_DIR also READS the earlier env/Caddyfile from there (so a test can run it on a copy)
+RD=""; if [ "$DRY" = 1 ]; then RD="${MA_RENDER_DIR:-}"; fi
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!! \033[0m %s\n' "$*" >&2; }
@@ -64,6 +69,7 @@ say "My Assistant installer — ${PRETTY_NAME} on ${ARCH}${DRYNOTE}"
 
 export DEBIAN_FRONTEND=noninteractive
 
+if [ "$ADDR_ONLY" != 1 ]; then   # 2.3.19: skipped when only the address changes
 # ---------- packages ----------
 say "Installing system packages"
 run apt-get update -y -q
@@ -139,33 +145,43 @@ else
 fi
 say "App version: $VERSION"
 
+else
+  VERSION="$(cat "$OPT/current/VERSION" 2>/dev/null || echo "(dry-run)")"
+  say "Changing the address only (app version $VERSION stays)"
+fi
+
 # ---------- address (domain) ----------
-if [ -f "$ETC/env" ] && [ -z "${MA_DOMAIN:-}" ]; then
-  DOMAIN="$(sed -n 's#^MA_PUBLIC_URL=https\?://##p' "$ETC/env" | head -1)"
+# The main address is kept in the env file (MA_PUBLIC_URL), so a re-run or an update keeps it — also one chosen in
+# Settings → Main address (2.3.19).
+SAVED_DOMAIN=""
+if [ -f "$RD$ETC/env" ]; then SAVED_DOMAIN="$(sed -n 's#^MA_PUBLIC_URL=https\?://##p' "$RD$ETC/env" | head -1 | sed 's#/.*##')"; fi
+if [ -n "${MA_DOMAIN:-}" ]; then DOMAIN="$(printf '%s' "$MA_DOMAIN" | sed -E 's#^https?://##; s#/.*##' | tr 'A-Z' 'a-z')"; else DOMAIN="$SAVED_DOMAIN"; fi
+if [ "$ADDR_ONLY" = 1 ]; then
+  [[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "Not a valid address: $DOMAIN"
 fi
 if [ -z "${DOMAIN:-}" ]; then
-  if [ -n "${MA_DOMAIN:-}" ]; then DOMAIN="$MA_DOMAIN"; else
-    IP=""
-    for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
-      IP="$(curl -4 -fsS --max-time 8 "$u" 2>/dev/null | tr -d '[:space:]')" || true
-      [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break || IP=""
-    done
-    [ -n "$IP" ] || die "Could not find this server's public IPv4. Re-run with MA_DOMAIN=your.domain"
-    DOMAIN="${IP//./-}.sslip.io"
-  fi
+  IP=""
+  for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+    IP="$(curl -4 -fsS --max-time 8 "$u" 2>/dev/null | tr -d '[:space:]')" || true
+    [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break || IP=""
+  done
+  [ -n "$IP" ] || die "Could not find this server's public IPv4. Re-run with MA_DOMAIN=your.domain"
+  DOMAIN="${IP//./-}.sslip.io"
 fi
 PUBLIC_URL="https://$DOMAIN"
 say "Private address: $PUBLIC_URL"
 
 # Extra addresses for the same assistant (e.g. your own domain next to the sslip one): MA_EXTRA_DOMAINS="a.com,b.com".
-# Not given: keep what was saved before, plus any extra host already on the Caddyfile site line (added by hand).
+# Not given: keep what was saved before, plus any extra host already on the Caddyfile site line (added by hand), and
+# (2.3.19) when MA_DOMAIN changes the main address, the old main address too — so nothing that used it stops working.
 # Given (even empty): exactly that list.
 if [ -n "${MA_EXTRA_DOMAINS+set}" ]; then EXTRA_RAW="$MA_EXTRA_DOMAINS"; else
-  EXTRA_RAW="$( [ -f "$ETC/env" ] && sed -n 's/^MA_EXTRA_DOMAINS=//p' "$ETC/env" | head -1 || true)"
-  if [ -f /etc/caddy/Caddyfile ] && grep -q 'My Assistant' /etc/caddy/Caddyfile; then
-    line="$(grep -E '^[^#[:space:]{].*[{][[:space:]]*$' /etc/caddy/Caddyfile | grep -F "$DOMAIN" | head -1 | sed -E 's/[[:space:]]*[{][[:space:]]*$//')" || true
+  EXTRA_RAW="$( [ -f "$RD$ETC/env" ] && sed -n 's/^MA_EXTRA_DOMAINS=//p' "$RD$ETC/env" | head -1 || true)"
+  if [ -f "$RD/etc/caddy/Caddyfile" ] && grep -q 'My Assistant' "$RD/etc/caddy/Caddyfile"; then
+    line="$(grep -E '^[^#[:space:]{].*[{][[:space:]]*$' "$RD/etc/caddy/Caddyfile" | grep -F "${SAVED_DOMAIN:-$DOMAIN}" | head -1 | sed -E 's/[[:space:]]*[{][[:space:]]*$//')" || true
     EXTRA_RAW="$EXTRA_RAW,$line"
   fi
+  if [ -n "$SAVED_DOMAIN" ] && [ "$SAVED_DOMAIN" != "$DOMAIN" ]; then EXTRA_RAW="$EXTRA_RAW,$SAVED_DOMAIN"; fi
 fi
 EXTRA=""
 for hst in $(printf '%s' "$EXTRA_RAW" | tr ', ' '\n\n'); do
@@ -176,6 +192,19 @@ for hst in $(printf '%s' "$EXTRA_RAW" | tr ', ' '\n\n'); do
 done
 if [ -n "$EXTRA" ]; then say "Also answering on: $EXTRA"; fi
 
+# 2.3.19: lines in the env file this installer does not write itself (added by hand) are kept, not dropped
+MANAGED='MA_PUBLIC_URL|MA_DATA_DIR|MA_PORT|MA_HOST|MA_WORKSPACE|MA_SITES_DIR|MA_SANDBOX_USER|MA_RELEASE_BASE|MA_EXTRA_DOMAINS|NODE_ENV'
+KEEP_ENV=""
+if [ -f "$RD$ETC/env" ]; then KEEP_ENV="$(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$RD$ETC/env" | grep -vE "^($MANAGED)=" || true)"; fi
+if [ "$ADDR_ONLY" = 1 ] && [ -f "$RD$ETC/env" ]; then
+  # only the address changes: every other value stays exactly as it was
+  KEEP_ENV="$(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$RD$ETC/env" | grep -vE '^(MA_PUBLIC_URL|MA_EXTRA_DOMAINS)=' || true)"
+  { echo "# My Assistant settings (no secrets here; keys live encrypted in $DATA)"
+    echo "MA_PUBLIC_URL=$PUBLIC_URL"
+    echo "MA_EXTRA_DOMAINS=$EXTRA"
+    if [ -n "$KEEP_ENV" ]; then printf '%s\n' "$KEEP_ENV"; fi
+  } | write_file "$ETC/env" 644 root:root
+else
 write_file "$ETC/env" 644 root:root <<EOF
 # My Assistant settings (no secrets here; keys live encrypted in $DATA)
 MA_PUBLIC_URL=$PUBLIC_URL
@@ -188,8 +217,11 @@ MA_SANDBOX_USER=$RUN_USER
 MA_RELEASE_BASE=$ENV_RELEASE_BASE
 MA_EXTRA_DOMAINS=$EXTRA
 NODE_ENV=production
+${KEEP_ENV}
 EOF
+fi
 
+if [ "$ADDR_ONLY" != 1 ]; then   # 2.3.19: skipped when only the address changes
 # ---------- sudo rules (narrow) ----------
 say "Setting permissions"
 write_file /etc/sudoers.d/myassistant 440 root:root <<EOF
@@ -230,6 +262,52 @@ write_file /usr/local/sbin/myassistant-update 755 root:root <<EOF
 # repo's /docs on raw.githubusercontent.com, then the release site — sha256-checked; or the older "GitHub latest release"
 # mode when a repo owner/name is set.
 set -euo pipefail
+# 2.3.19: Settings → Main address writes $DATA/address-request and starts this same unit (the one narrow sudo rule that
+# Update now uses; no new rule). Then this changes the address only — the installer's own address step — tests the new
+# address, and puts the old files back if the test fails. Nothing from the request is run: it is checked letter by letter.
+REQ="$DATA/address-request"
+if [ -f "\$REQ" ] && [ ! -L "\$REQ" ]; then
+  exec >"$DATA/address.log" 2>&1
+  echo "=== address change started \$(date -Is) ==="
+  rq() { sed -n "s/^\$1=//p" "\$REQ" | head -1 | tr -d '\r' | cut -c1-2000; }
+  NEW="\$(rq main)"; NEWX="\$(rq extra)"; NONCE="\$(rq nonce)"; AT="\$(rq at)"
+  rm -f "\$REQ"
+  set -a; . $ETC/env; set +a
+  OLD="\${MA_PUBLIC_URL#https://}"; OLD="\${OLD#http://}"; OLD="\${OLD%%/*}"
+  res() { printf 'state=%s\nmain=%s\nmessage=%s\nat=%s\n' "\$1" "\$2" "\$3" "\$(date +%s)" > "$DATA/address-result"; chown $APP_USER:$APP_USER "$DATA/address-result"; chmod 600 "$DATA/address-result"; echo "\$3"; }
+  HOSTRE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
+  if ! [[ "\$NEW" =~ \$HOSTRE ]] || [ \${#NEW} -gt 253 ]; then res failed "\$OLD" "Not changed: that address is not valid. The main address is still https://\$OLD."; exit 1; fi
+  if ! [[ "\$NONCE" =~ ^[A-Za-z0-9]{8,40}\$ ]]; then res failed "\$OLD" "Not changed: the request was not complete. Tap Switch again."; exit 1; fi
+  if ! [[ "\$AT" =~ ^[0-9]{9,11}\$ ]] || [ \$(( \$(date +%s) - AT )) -gt 900 ]; then res failed "\$OLD" "Not changed: the request was too old. Tap Switch again."; exit 1; fi
+  X=""
+  for hst in \$(printf '%s' "\$NEWX" | tr ',' '\n'); do
+    if [[ "\$hst" =~ \$HOSTRE ]] && [ "\$hst" != "\$NEW" ]; then X="\${X:+\$X,}\$hst"; fi
+  done
+  # the old main address always stays as an extra one, so nothing that used it stops working
+  if [ -n "\$OLD" ] && [ "\$OLD" != "\$NEW" ]; then case ",\$X," in *",\$OLD,"*) ;; *) X="\${X:+\$X,}\$OLD";; esac; fi
+  echo "from \$OLD to \$NEW (also: \$X)"
+  cp -a $ETC/env $ETC/env.before-address
+  cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-address 2>/dev/null || true
+  OKT=0
+  if MA_ADDRESS_ONLY=1 MA_UPDATE=1 MA_DOMAIN="\$NEW" MA_EXTRA_DOMAINS="\$X" MA_RELEASE_BASE="$ENV_RELEASE_BASE" bash $OPT/current/install.sh; then
+    # the new address must open this same assistant over https (a new address gets its certificate now: up to ~2 min)
+    for _ in \$(seq 1 40); do
+      if curl -fsS --max-time 10 --resolve "\$NEW:443:127.0.0.1" "https://\$NEW/api/address-check/\$NONCE" 2>/dev/null | grep -q "\$NONCE"; then OKT=1; break; fi
+      sleep 3
+    done
+  fi
+  if [ "\$OKT" = 1 ]; then
+    res ok "\$NEW" "The main address is now https://\$NEW. The old address https://\$OLD keeps working."
+    echo "=== address change finished \$(date -Is) ==="; exit 0
+  fi
+  echo "the new address did not pass its test; putting the old address back"
+  cp -a $ETC/env.before-address $ETC/env
+  if [ -f /etc/caddy/Caddyfile.before-address ]; then cp -a /etc/caddy/Caddyfile.before-address /etc/caddy/Caddyfile; fi
+  systemctl restart caddy || true
+  systemctl restart myassistant || true
+  res failed "\$OLD" "Not changed: https://\$NEW did not open this assistant on this server (its secure certificate may not be ready yet, or the address points somewhere else). The main address is still https://\$OLD. Try again in a few minutes."
+  exit 1
+fi
 exec >"$DATA/update.log" 2>&1
 echo "=== update started \$(date -Is) ==="
 set -a; . $ETC/env; set +a
@@ -317,6 +395,8 @@ case "${1:-status}" in
 esac
 EOF
 
+fi
+
 # ---------- HTTPS (Caddy) ----------
 say "Configuring HTTPS for $DOMAIN"
 if [ -f /etc/caddy/Caddyfile ] && ! grep -q 'My Assistant' /etc/caddy/Caddyfile; then run cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.before-myassistant"; fi
@@ -352,7 +432,12 @@ if [ "$DRY" != 1 ] && command -v caddy >/dev/null 2>&1 && ! caddy validate --con
   sed -i '/# 2.3.16: a page that is not there/,/^\t}$/d' /etc/caddy/Caddyfile
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || echo "Note: caddy validate reports a problem with /etc/caddy/Caddyfile (see: caddy validate --config /etc/caddy/Caddyfile)"
 fi
+# 2.3.19: an address change stops here if the web server can't read its new file (the caller puts the old one back)
+if [ "$ADDR_ONLY" = 1 ] && [ "$DRY" != 1 ] && command -v caddy >/dev/null 2>&1 && ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+  die "The web server could not read its new settings for $DOMAIN."
+fi
 
+if [ "$ADDR_ONLY" != 1 ]; then   # 2.3.19: skipped when only the address changes
 # ---------- firewall on this machine ----------
 say "Opening ports 80 and 443 on this machine's firewall"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -377,6 +462,8 @@ if [ "$DRY" != 1 ] && [ ! -f "$DATA/assistant.db" ] && [ ! -f "$DATA/setup-code"
   install -m 600 -o "$APP_USER" -g "$APP_USER" /dev/null "$DATA/setup-code"; echo "$code" > "$DATA/setup-code"
 fi
 
+fi
+
 # ---------- start ----------
 say "Starting"
 run systemctl daemon-reload
@@ -391,7 +478,9 @@ fi
 
 echo
 echo "============================================================"
-if [ "$UPDATE" = 1 ]; then
+if [ "$ADDR_ONLY" = 1 ]; then
+  echo " Main address: $PUBLIC_URL${EXTRA:+ (also: $EXTRA)}"
+elif [ "$UPDATE" = 1 ]; then
   echo " Updated My Assistant to version $VERSION."
 else
   echo " My Assistant $VERSION is installed."

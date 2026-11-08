@@ -390,3 +390,7 @@ a.siteopen{display:inline-flex;align-items:center;min-height:36px;padding:6px 12
 .btext.md th,.btext.md td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
 .btext.md th{font-weight:600;background:rgba(127,127,127,.1)}
 @media (prefers-color-scheme:light){.btext.md pre{background:rgba(0,0,0,.05)}}
+
+/* 2.3.19: Settings → Main address */
+.addrmain{margin:4px 0 8px;font-size:17px;word-break:break-all}
+.addrlist{margin:4px 0 8px;padding-left:18px;word-break:break-all}

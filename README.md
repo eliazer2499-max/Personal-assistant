@@ -115,6 +115,12 @@ curl https://updates.personalassistance.soft-tech.net/install.sh | sudo MA_DOMAI
 Or keep the sslip address and add the domain as an extra:
 `... | sudo MA_UPDATE=1 MA_EXTRA_DOMAINS=ai.example.com bash`
 
+**Change the main address later, without a command (2.3.19):** Settings → Main address. Pick one of the other
+addresses (or type a new one), tap **Check**, then **Switch**. Check makes sure the address points to this server and
+opens this same assistant; if not, nothing changes. The old address keeps working, updates keep your choice, and
+Telegram moves to the new address by itself. If you use Google sign-in, add the new return address to your Google
+console afterwards.
+
 ---
 
 ## Step 5 — First login (on your phone)

@@ -42,6 +42,18 @@ export async function setup(o) {
   return { ok: steps.every(s => !/failed/.test(s)), steps };
 }
 
+// 2.3.19: after the main address changed, register the same two webhooks (same ids) on the new address.
+export async function resync() {
+  if (!setting('sms_username') || !secret('sms_password')) return '';
+  const url = cfg.publicUrl + hookPath(); const out = [];
+  for (const event of ['sms:received', 'mms:received']) {
+    const r = await gw('POST', '/webhooks', { id: 'myassistant-' + event.replace(':', '-'), url, event });
+    out.push(r.ok ? `${event} ok` : `${event} failed (${r.status})`);
+  }
+  audit('system', 'sms.webhook', out.join(', '));
+  return 'SMS webhooks: ' + out.join(', ');
+}
+
 export async function handle(secretInPath, raw, headers) {
   if (!secret('sms_hook_secret') || !safeEqual(secretInPath, secret('sms_hook_secret'))) return { status: 404 };
   const sk = secret('sms_signing_key');

@@ -618,7 +618,7 @@ const SETTINGS_GROUPS = [
   ['Assistant', [['brain', '🧠', 'Brain (AI keys)', 'AI keys, who does what, models, limits'], ['general', '⚙️', 'General', 'Name, time zone, morning summary, light/dark']]],
   ['Connections', [['channels', '💬', 'Channels', 'WhatsApp Agent, Telegram, email, text/SMS'], ['google', '📧', 'Google accounts', 'Gmail, Calendar, Drive, Docs, Sheets, Contacts'], ['#/more/vault', '🔑', 'Vault', 'Tokens for GitHub, Cloudflare and more']]],
   ['Abilities', [['tools', '🧰', 'Tools', 'Turn abilities on or off'], ['browser', '🌐', 'Browser & logins', 'Browser actions, saved logins, live view']]],
-  ['System', [['updates', '⬆️', 'Updates & backups', 'New version, update, backups'], ['security', '🛡️', 'Security', 'Password, 2-step sign-in, sessions'], ['#/more/audit', '📜', 'Activity log', 'What it did, and which key answered']]],
+  ['System', [['address', '🌍', 'Main address', 'The web address your assistant uses'], ['updates', '⬆️', 'Updates & backups', 'New version, update, backups'], ['security', '🛡️', 'Security', 'Password, 2-step sign-in, sessions'], ['#/more/audit', '📜', 'Activity log', 'What it did, and which key answered']]],
 ];
 const SETTINGS_MENU = SETTINGS_GROUPS.flatMap(([, items]) => items).filter(x => !x[0].startsWith('#')).map(([id, , t, s]) => [id, t, s]);
 function settingsView(sub) {
@@ -632,7 +632,7 @@ function settingsView(sub) {
           id === 'updates' && ME?.update_available ? h('span', { class: 'dot', 'aria-label': 'update ready' }) : null, h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')))))));
     return shell('settings', 'Settings', '', page);
   }
-  const views = { brain: brainView, general: generalView, google: googleView, channels: channelsView, tools: toolsView, updates: updatesView, security: securityView, browser: (b) => browserSettingsView(b, UI) };
+  const views = { brain: brainView, general: generalView, google: googleView, channels: channelsView, tools: toolsView, updates: updatesView, address: addressView, security: securityView, browser: (b) => browserSettingsView(b, UI) };
   const body = h('div', { class: 'page' });
   (views[sub] || (() => {}))(body);
   return shell('settings', (SETTINGS_MENU.find(x => x[0] === sub) || [, 'Settings'])[1], '', body, { back: '#/settings' });
@@ -1158,6 +1158,65 @@ function updateSourceCard(r) {
       return api('/api/settings', { update_repo: '', update_source: v === 'default' ? '' : link.value });
     }, 'Saved. Tap “Check now” to look for an update.').then(x => { if (x) setTimeout(route, 900); }) }, 'Save')), out);
 }
+// 2.3.19: Settings → Main address. Shows the main address and the others this server answers on; Check, then Switch.
+async function addressView(body) {
+  const r = await api('/api/address');
+  const out = msgEl(), cout = msgEl();
+  const inp = h('input', { id: 'newaddr', placeholder: 'ai.example.com', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false', inputmode: 'url', 'aria-label': 'New main address' });
+  let checked = null;
+  const swBtn = h('button', { class: 'primary', 'data-addr-switch': '1', disabled: true, onclick: (e) => {
+    if (!checked) return;
+    if (!confirm(`Make https://${checked} the main address?\n\nThe assistant restarts for about a minute. The old address keeps working.`)) return;
+    act(e.target, out, () => api('/api/address/switch', { address: checked, confirm: true }), (x) => { follow(x.to); return x.started === false ? 'Saved (test mode: nothing restarted).' : `Switching to https://${x.to}… this takes about a minute.`; });
+  } }, 'Switch');
+  const setPick = (v) => { inp.value = v; checked = null; swBtn.disabled = true; swBtn.textContent = 'Switch'; say(cout, ''); for (const c of picks.querySelectorAll('[data-addr-pick]')) c.classList.toggle('on', c.dataset.addrPick === v); };
+  const doCheck = (e) => act(e.target, cout, async () => {
+    checked = null; swBtn.disabled = true; swBtn.textContent = 'Switch';
+    const x = await api('/api/address/check', { address: inp.value });
+    if (!x.ok) throw new Error(x.message);
+    checked = x.host; swBtn.disabled = false; swBtn.textContent = `Switch to ${x.host}`;
+    return x;
+  }, (x) => x.message);
+  inp.addEventListener('input', () => { checked = null; swBtn.disabled = true; swBtn.textContent = 'Switch'; });
+  const picks = h('div', { class: 'kmodels' }, r.extras.map(x => h('button', { type: 'button', class: 'chip', 'data-addr-pick': x, onclick: () => setPick(x) }, x)));
+  const resBox = h('div', {});
+  const showResult = (x) => {
+    resBox.replaceChildren();
+    if (x.pending) resBox.append(h('p', { class: 'stat no', 'data-addr-pending': '1' }, `Switching to https://${x.pending.to}… (about a minute)`));
+    else if (x.result) resBox.append(h('p', { class: 'stat ' + (x.result.state === 'ok' ? 'ok' : 'no'), 'data-addr-result': x.result.state }, x.result.message),
+      x.result.state === 'ok' && x.result.main && x.result.main !== location.hostname ? h('button', { class: 'primary', 'data-addr-open': '1', onclick: () => { location.href = 'https://' + x.result.main + '/'; } }, 'Open https://' + x.result.main) : null);
+  };
+  showResult(r);
+  // after Switch: the assistant restarts; ask again every few seconds until the result is in
+  const follow = (to) => {
+    let n = 0;
+    const tick = async () => {
+      n++;
+      try { const x = await api('/api/address'); if (!x.pending && x.result && (x.result.main === to || x.result.state !== 'ok')) { showResult(x); say(out, ''); return; } showResult(x); } catch {}
+      if (n < 60) setTimeout(tick, 5000);
+    };
+    setTimeout(tick, 4000);
+  };
+  if (r.pending) follow(r.pending.to);
+  body.append(
+    h('div', { class: 'card', id: 'addrnow' }, h('h3', {}, 'Main address'),
+      h('p', { class: 'addrmain', 'data-addr-main': r.main }, h('b', {}, r.main_url)),
+      h('p', { class: 'fine' }, 'Links your assistant sends (sites, files, sign-in pages, webhooks) use the main address.'),
+      r.extras.length ? h('div', {}, h('p', { class: 'fine' }, 'It also answers on:'), h('ul', { class: 'fine addrlist' }, r.extras.map(x => h('li', { 'data-addr-extra': x }, 'https://' + x)))) : h('p', { class: 'fine' }, 'No other addresses yet.'),
+      resBox),
+    h('div', { class: 'card', id: 'addrchange' }, h('h3', {}, 'Change the main address'),
+      r.extras.length ? h('p', { class: 'fine' }, 'Pick one of your other addresses, or type a new one.') : h('p', { class: 'fine' }, 'Type the new address.'),
+      picks,
+      h('label', { for: 'newaddr' }, 'New main address'), inp,
+      h('p', { class: 'fine' }, 'A new address must point to this server first (an A record where you bought the domain).'),
+      h('div', { class: 'row' }, h('button', { 'data-addr-check': '1', onclick: doCheck }, 'Check'), swBtn), cout, out,
+      h('p', { class: 'fine' }, 'Check makes sure the address points to this server and opens this same assistant. If it doesn\'t, nothing changes. After the switch, the old address keeps working, and you sign in once on the new one.')),
+    r.notes.length || r.telegram ? h('div', { class: 'card', id: 'addrnotes' }, h('h3', {}, 'Good to know'),
+      h('ul', { class: 'fine' },
+        r.telegram ? h('li', { 'data-addr-note': 'telegram' }, 'Telegram moves to the new address by itself after the switch.') : null,
+        r.notes.map(n => h('li', { 'data-addr-note': n.id }, n.text)))) : null);
+}
+
 async function updatesView(body) {
   const r = await api('/api/update'); const b = await api('/api/backups'); const s = await api('/api/settings'); const g = await api('/api/google');
   const updStat = h('p', { class: 'stat ' + (r.available ? 'no' : 'ok') }, r.available ? `Version ${r.available} is ready.` : 'Up to date (as of the last check).');

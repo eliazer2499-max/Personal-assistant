@@ -30,6 +30,17 @@ export async function setup(tok) {
   audit('owner', 'telegram.setup', '@' + me.username);
   return { bot: me.username, link: `https://t.me/${me.username}?start=${code}`, code };
 }
+// 2.3.19: the webhook follows the main address. Asked at every start; set again (same secret, nothing dropped) only when
+// it points somewhere else — e.g. right after Settings → Main address switched to a new address.
+export async function syncWebhook() {
+  if (!secret('telegram_token') || !secret('telegram_hook_secret')) return '';
+  const want = cfg.publicUrl + '/hook/telegram';
+  const info = await api('getWebhookInfo', {});
+  if (info && info.url === want) return '';
+  await api('setWebhook', { url: want, secret_token: secret('telegram_hook_secret'), allowed_updates: ['message', 'callback_query'], drop_pending_updates: false });
+  audit('system', 'telegram.webhook', 'now ' + want);
+  return 'Telegram webhook moved to ' + want;
+}
 export async function disconnect() {
   try { await api('deleteWebhook', {}); } catch {}
   for (const k of ['telegram_token', 'telegram_hook_secret', 'telegram_pair_code']) setSecret(k, '');
