@@ -6,7 +6,7 @@ import { cfg, VERSION } from './config.js';
 import { db, all, run, get, now, setting, setSetting, log, audit } from './db.js';
 import { expire } from './approvals.js';
 import { notifyOwner } from './notify.js';
-import { startJob } from './brain.js';
+import { startJob, retryWaiting } from './brain.js';
 
 export function localParts(t = Date.now(), tz = setting('timezone') || 'UTC') {
   const f = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
@@ -92,6 +92,7 @@ export async function tick() {
     run('DELETE FROM login_fail WHERE ts < ?', now() - 24 * 3600 * 1000);
     await reminders();
     schedules();
+    retryWaiting();      // 2.3.18: requests saved when no AI key could answer
     morning();
     if (now() - lastMail > 55000) { lastMail = now(); const { poll } = await import('./channels/email.js'); await poll(); }
     await nightly();

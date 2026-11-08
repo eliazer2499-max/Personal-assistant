@@ -1,6 +1,8 @@
 // The brain: model providers (Gemini by default, any OpenAI-compatible API as option) and the
 // background job runner. A job is an agent loop that can take many steps (default up to 40 model
 // steps / 60 minutes), showing each tool step live in the chat.
+import fs from 'node:fs';
+import path from 'node:path';
 import { cfg } from './config.js';
 import { all, get, run, now, setting, secret, redact, log, audit, rememberSecret } from './db.js';
 import { declarations, execTool, summarizeArgs } from './tools/index.js';
@@ -15,7 +17,7 @@ import { doneMessage } from './approvals.js';
 import { withoutApprovalEcho, withoutPastedCode, restatesResult, asksForDesign, mentionsPlaceholder, LOGO_NUDGE } from './tidy.js';
 import { parseReplies, plainAsReplies, resolveReplies, repliesJson, looksLikeReplies, repliesToPlain } from './replies.js';
 import { classify } from './aikeys.js';
-import { parseHarmony } from './harmony.js';
+import { parseHarmony, toolNameFor } from './harmony.js';
 import { outputModalities, detectPictures } from './pictures.js';
 export { aikeys };
 
@@ -238,11 +240,16 @@ async function openaiCompat({ system, items, tools, noTools, base, model, key, c
   if (!model) throw keyFail({ kind: 'model', reason: 'no model name — tap Test and pick one', until: 0, problem: 'model not found' });
   const msgs = toOpenAIMessages(system, items, caps);
   const useTools = tools?.length && !noTools ? tools : null;
+  // 2.3.18 (Abish, Nov 8 2:16 AM: "error 400: … attempted to call tool 'file_write' which was not in request.tools"): a
+  // key keeps getting the same tools on every round, also on a "no more tools" round (then tool_choice "none"), so a
+  // model that saw tools earlier in this job is never sent a request without them.
+  const sendTools = tools?.length ? tools : null;
   let body;
   if (bodyFor) body = bodyFor(msgs, useTools);          // 2.3.14: Cloudflare builds its own body (its schema is stricter)
   else {
     body = { model, messages: msgs, ...(extraBody || {}) };
-    if (useTools) body.tools = useTools.map(t => ({ type: 'function', function: t }));
+    if (sendTools) body.tools = sendTools.map(t => ({ type: 'function', function: t }));
+    if (sendTools && noTools) body.tool_choice = 'none';
     if (maxOut) body[maxField(base)] = maxOut;          // 2.3.14: a size-capped request also caps the answer (the limit counts both)
   }
   const r = await postOnce(base + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: 'Bearer ' + key } : {}) }, body: JSON.stringify(body) }, 'openai');
@@ -296,20 +303,40 @@ const CORE_TOOLS = ['calculator', 'memory_recall', 'memory_save', 'web_search', 
 const TOOL_WORDS = [
   [/e-?mail|gmail|inbox|mail\b/i, /^gmail_|^inbox_/], [/calendar|meeting|event|appointment/i, /^calendar_/], [/drive|\bdocs?\b|sheet|spreadsheet/i, /^drive_|^docs_|^sheets_/],
   [/contact|phone number/i, /^contacts_/], [/remind|reminder|every (day|week|morning)|schedule|later/i, /^schedule_|^tasks_/], [/task|to-?do/i, /^tasks_/],
-  [/site|website|web ?page|publish/i, /site|publish|pages/], [/browser|log ?in|sign ?up|account|password|click/i, /^browser_|^signup_/],
+  [/site|website|web ?page|publish/i, /site|publish|pages/], [/\b(page|html|css|landing|design|redesign|logo|button|layout)\b/i, /^file_|^project_|^site_|^publish_site$|^sites_list$/],   // 2.3.18 [/browser|log ?in|sign ?up|account|password|click/i, /^browser_|^signup_/],
   [/picture|image|photo|draw|logo/i, /^image_|^send_file$/], [/video/i, /^video_/], [/apk|android|app\b/i, /^android_/], [/server|ssh|command|terminal/i, /^ssh_|^servers_|^run_command$/],
   [/file|folder|project|code/i, /^file_|^project_|^run_command$/], [/whatsapp|sms|text (him|her|them)|message (him|her)/i, /^whatsapp_send$|^sms_send$/], [/github|repo/i, /^github_/],
   [/update|version/i, /^check_update$/], [/remember|memory|forget/i, /^memory_/], [/search|look up|find|news|price|weather/i, /^web_/],
 ];
-function shortTool(t) {
+function shortTool(t, tiny = false) {
   const cut = (x, n) => { x = String(x || ''); const one = x.split(/(?<=[.!?])\s/)[0]; return (one.length <= n ? one : x.slice(0, n - 1) + '…'); };
   const p = t.parameters && typeof t.parameters === 'object' ? t.parameters : null;
   const props = {};
-  for (const [k, v] of Object.entries(p?.properties || {})) props[k] = v && typeof v === 'object' ? { ...v, ...(v.description ? { description: cut(v.description, 80) } : {}) } : v;
-  return { ...t, description: cut(t.description, 160), ...(p ? { parameters: { ...p, properties: props } } : {}) };
+  for (const [k, v] of Object.entries(p?.properties || {})) {
+    if (!(v && typeof v === 'object')) { props[k] = v; continue; }
+    const { description, ...rest } = v;
+    props[k] = tiny ? rest : { ...v, ...(description ? { description: cut(description, 80) } : {}) };
+  }
+  return { ...t, description: cut(t.description, tiny ? 70 : 160), ...(p ? { parameters: { ...p, properties: props } } : {}) };
 }
-function pickTools(tools, items, userText, budget) {
-  const used = new Set(items.flatMap(it => (it.calls || []).map(c => c.name)));
+/**
+ * 2.3.18: tools that belong together. A model that may build a site also needs to read and write its files, look at it
+ * and publish it — sending publish_site without file_write is what made the 2nd key call file_write anyway and get
+ * "400 … attempted to call tool 'file_write' which was not in request.tools".
+ */
+export const TOOL_FAMILIES = [
+  ['project_list', 'file_list', 'file_read', 'file_write', 'site_screenshot', 'publish_site', 'sites_list'],
+];
+/** Names of tools this conversation already used or mentions (a call in any step, or the name written in the history). */
+function toolsSeen(tools, items) {
+  const seen = new Set(items.flatMap(it => (it.calls || []).map(c => c.name)));
+  const words = items.map(it => String(it.text || '')).join('\n');
+  for (const t of tools) if (t && t.name && t.name.includes('_') && words.includes(t.name)) seen.add(t.name);
+  return seen;
+}
+function pickTools(tools, items, userText, budget, keep = null) {
+  const used = toolsSeen(tools, items);
+  if (keep) for (const n of keep) used.add(n);
   const score = (t) => {
     let s = used.has(t.name) ? 1000 : 0;
     if (CORE_TOOLS.includes(t.name)) s += 5;
@@ -318,14 +345,40 @@ function pickTools(tools, items, userText, budget) {
     for (const w of words) { if (t.name.includes(w)) s += 10; else if (String(t.description || '').toLowerCase().includes(w)) s += 1; }
     return s;
   };
-  const ranked = tools.map((t, i) => ({ t: shortTool(t), s: score(t), i })).sort((a, b) => b.s - a.s || a.i - b.i);
-  const out = []; let size = 0;
-  for (const r of ranked) {
-    const n = estimateTokens(r.t);
-    if (size + n > budget && !(r.s >= 1000)) continue;       // a tool this job already called always stays
-    out.push(r); size += n;
+  const scored = tools.map((t, i) => ({ t, s: score(t), i }));
+  // a family member that is wanted (or already in use) brings the whole family along, at the same rank
+  for (const fam of TOOL_FAMILIES) {
+    const top = Math.max(0, ...scored.filter(r => fam.includes(r.t.name)).map(r => r.s));
+    if (top >= 20) for (const r of scored) if (fam.includes(r.t.name)) r.s = Math.max(r.s, top);
   }
-  return out.sort((a, b) => a.i - b.i).map(r => r.t);
+  // a family goes in whole or not at all (unless a member is already in use, then the whole family is in use)
+  const famOf = (name) => TOOL_FAMILIES.findIndex(f => f.includes(name));
+  const pick = (tiny) => {
+    const ranked = scored.map(r => ({ ...r, t: shortTool(r.t, tiny) })).sort((a, b) => b.s - a.s || a.i - b.i);
+    const out = []; let size = 0; const doneFam = new Set();
+    for (const r of ranked) {
+      const fi = famOf(r.t.name);
+      if (fi >= 0 && r.s >= 20) {
+        if (doneFam.has(fi)) continue;
+        doneFam.add(fi);
+        const unit = ranked.filter(x => famOf(x.t.name) === fi);
+        const n = unit.reduce((m, x) => m + estimateTokens(x.t), 0);
+        if (size + n > budget && !(r.s >= 1000)) continue;
+        for (const x of unit) out.push(x); size += n;
+        continue;
+      }
+      if (fi >= 0 && doneFam.has(fi)) continue;
+      const n = estimateTokens(r.t);
+      if (size + n > budget && !(r.s >= 1000)) continue;       // a tool this job already called / was already sent always stays
+      out.push(r); size += n;
+    }
+    return { out, size };
+  };
+  let res = pick(false);
+  // the wanted tools don't fit with their descriptions: send them all with very short ones rather than leave some out
+  const wanted = scored.filter(r => r.s >= 20).length;
+  if (res.out.filter(r => r.s >= 20).length < wanted || res.size > budget) { const tiny = pick(true); if (tiny.out.length >= res.out.length) res = tiny; }
+  return res.out.sort((a, b) => a.i - b.i).map(r => r.t);
 }
 const clip = (s, n) => { s = String(s ?? ''); return s.length <= n ? s : s.slice(0, n) + `… [${s.length - n} more characters cut to fit this AI key's size limit]`; };
 const MEDIA_NOTE = (it) => `[${(it.media || []).length} attachment(s) left out: this AI key only takes small requests]`;
@@ -335,10 +388,10 @@ const MEDIA_NOTE = (it) => `[${(it.media || []).length} attachment(s) left out: 
  * shortened, then the oldest history dropped. His current message and this job's steps always stay (tool calls keep
  * their answers, so the conversation still fits together). → { args, trimmed, est, maxOut }
  */
-export function fitToSize(args, capTokens, { force = false } = {}) {
+export function fitToSize(args, capTokens, { force = false, keep = null } = {}) {
   const maxOut = Math.max(512, Math.min(2048, Math.floor(capTokens * 0.25)));
   const room = Math.floor(capTokens * 0.9) - maxOut;
-  const est = (a) => estimateTokens({ s: a.system, i: a.items, t: a.noTools ? [] : a.tools || [] });
+  const est = (a) => estimateTokens({ s: a.system, i: a.items, t: a.tools || [] });     // 2.3.18: tools go on every round (tool_choice "none" on the last)
   if (!force && est(args) <= room) return { args, trimmed: false, est: est(args), maxOut };
   let items = (args.items || []).map(it => ({ ...it }));
   // where this job starts: his message just before the first tool call (or his last message)
@@ -354,7 +407,7 @@ export function fitToSize(args, capTokens, { force = false } = {}) {
   const clipTools = (nLast, nOther) => { const lt = lastTool(); items = items.map((it, i) => { if (it.role !== 'tool') return it; const j = JSON.stringify(it.result ?? null); const n = i === lt ? nLast : nOther; return j.length > n ? { ...it, result: { shortened: clip(j, n) } } : it; }); };
   const clipText = (n, nCur) => { items = items.map((it, i) => it.text && it.text.length > (i === cur ? nCur : n) ? { ...it, text: clip(it.text, i === cur ? nCur : n) } : it); };
   // 1. fewer tools, shorter descriptions (the full list alone is ~10,000 tokens)
-  if (tools.length && !args.noTools) tools = pickTools(tools, items, userText, Math.floor(room * 0.45));
+  if (tools.length) tools = pickTools(tools, items, userText, Math.floor(room * 0.45), keep);
   // 2. attachments out (one picture is tens of thousands of tokens)
   items = items.map(it => !(it.media && it.media.length) ? it : it.role === 'tool'
     ? { ...it, media: undefined, result: { ...(it.result && typeof it.result === 'object' ? it.result : { result: it.result }), picture: 'left out: this AI key only takes small requests' } }
@@ -363,11 +416,25 @@ export function fitToSize(args, capTokens, { force = false } = {}) {
   if (!fits()) clipTools(2500, 800);
   if (!fits()) clipText(2000, 6000);
   // 4. the oldest history first (never his current message or this job's steps); start with his words
-  while (est(a()) > room && cur > 0) { items.splice(0, 1); cur--; }
-  while (items.length > 1 && items[0].role !== 'user' && cur > 0) { items.splice(0, 1); cur--; }
+  // 2.3.18 (Abish, Nov 8 2:12 AM: "A designed page similar to my current site" → "Could you share the URL…?"): his
+  // earlier words are not just dropped — the newest few stay as one short "earlier in this chat" line.
+  const dropped = [];
+  const drop = () => { const it = items.shift(); cur--; if (it && it.role === 'user' && it.text) dropped.push(it.text); };
+  while (est(a()) > room && cur > 0) drop();
+  while (items.length > 1 && items[0].role !== 'user' && cur > 0) drop();
+  if (dropped.length && items.length) {
+    const words = dropped.map(t => String(t).replace(/… \[\d+ more characters cut[^\]]*\]/g, '…').replace(/\s+/g, ' ').trim()).filter(t => t.length > 3 && !BARE_REPLY.test(t));
+    const take = new Set(words.slice(-2));                                  // the newest two, and his asks about building things
+    for (const t of [...words].reverse()) { if (take.size >= 4) break; if (WORK_WORDS.test(t)) take.add(t); }
+    const said = words.filter(t => take.has(t)).map(t => '- ' + clip(t, 160));
+    if (said.length) {
+      const note = '[Earlier in this chat he said (older messages left out to fit this key):\n' + said.join('\n') + ']';
+      items.unshift({ role: 'user', text: note }, { role: 'assistant', text: '(noted)' }); cur += 2;
+    }
+  }
   // 5. still too big: harder
   if (est(a()) > room) { clipTools(1200, 300); clipText(600, 2500); }
-  if (est(a()) > room && tools.length) tools = pickTools(tools, items, userText, Math.floor(room * 0.2));
+  if (est(a()) > room && tools.length) tools = pickTools(args.tools || [], items, userText, Math.floor(room * 0.2), keep);   // (tools it already got stay)
   return { args: a(), trimmed: true, est: est(a()), maxOut };
 }
 
@@ -439,24 +506,52 @@ export async function callModel(args, opts = {}) {
         // 2.3.14: a key known to take only small requests (a limit it told us before, or a free Groq key) gets a request
         // cut to fit; a "request too large" answer gets ONE smaller try on the same key before the next key.
         const cap = aikeys.sizeCap(k);
-        const first = cap ? fitToSize(args, cap) : { args, trimmed: false, maxOut: 0 };
+        // 2.3.18: the tools this key was already sent in this job stay in every later request to it
+        const sent = sentToolsFor(args.tools, k.id);
+        let first = cap ? fitToSize(args, cap, { keep: sent }) : { args, trimmed: false, maxOut: 0 };
         if (first.trimmed) log('brain', `key "${k.name}": request cut to ~${first.est} tokens to fit its limit (${cap})`);
-        let resp;
-        try { resp = await once(first.args, first.maxOut); }
-        catch (e) {
+        // (only a request that got an answer counts: a refused one was never seen by the model)
+        const remember = (a) => { for (const t of a.tools || []) if (t && t.name) sent.add(t.name); };
+        let resp, answered = null;
+        try {
+          try { resp = await once(first.args, first.maxOut); answered = first.args; }
+          catch (e) {
+            // 2.3.18 (Abish, Nov 8 2:16 AM): "400 … attempted to call tool 'file_write' which was not in request.tools".
+            // One more try on the same key: with that tool in the request when it is a real one (and its family), else
+            // with tool_choice "none" for an answer in words. Then the next key.
+            if (e.keyFail?.kind !== 'tool_missing') throw e;
+            const want = toolNameFor(e.keyFail.tool || '', (args.tools || []).map(t => t.name)) || '';
+            const had = !first.args.noTools && (first.args.tools || []).some(t => t.name === want);
+            const real = !!want && !had && (args.tools || []).some(t => t.name === want);
+            log('brain', `key "${k.name}": called tool "${e.keyFail.tool || '?'}" that was not in its request; one more try ${real ? 'with it' : 'asking for words only'}`);
+            audit('assistant', 'brain.tool_missing', `key "${k.name}": called ${e.keyFail.tool || 'a tool'} that its request did not carry; asked again ${real ? 'with the tool' : 'for words only'}`);
+            let again;
+            if (real) {
+              sent.add(want);
+              for (const fam of TOOL_FAMILIES) if (fam.includes(want)) for (const n of fam) sent.add(n);
+              again = cap ? fitToSize(args, cap, { keep: sent, force: true }) : { args, trimmed: false, maxOut: 0 };
+            } else {
+              const base = cap ? first.args : args;
+              again = { ...first, args: { ...base, noTools: true, items: [...(base.items || []), { role: 'user', text: WORDS_ONLY_NOTE }] } };
+            }
+            first = again;
+            resp = await once(first.args, first.maxOut); answered = first.args;
+          }
+        } catch (e) {
           if (e.keyFail?.kind !== 'too_large') throw e;
           const f = e.keyFail;
           if (f.limit) aikeys.learnSizeCap(k.id, f.limit);
-          const sent = estimateTokens({ s: first.args.system, i: first.args.items, t: first.args.noTools ? [] : first.args.tools || [] });
-          const target = f.limit ? Math.min(f.limit, cap || f.limit) : Math.max(2000, Math.floor(Math.min(sent, f.requested || sent) * 0.5));
-          const smaller = fitToSize(args, Math.floor(target * (first.trimmed && !f.limit ? 0.7 : 1)), { force: true });
+          const sentTok = estimateTokens({ s: first.args.system, i: first.args.items, t: first.args.tools || [] });
+          const target = f.limit ? Math.min(f.limit, cap || f.limit) : Math.max(2000, Math.floor(Math.min(sentTok, f.requested || sentTok) * 0.5));
+          const smaller = fitToSize(args, Math.floor(target * (first.trimmed && !f.limit ? 0.7 : 1)), { force: true, keep: sent });
           log('brain', `key "${k.name}": request too large (${f.requested || '?'} of ${f.limit || '?'} tokens); one more try at ~${smaller.est} tokens`);
-          try { resp = await once(smaller.args, smaller.maxOut); }
+          try { resp = await once(smaller.args, smaller.maxOut); answered = smaller.args; }
           catch (e2) { if (e2.keyFail?.kind === 'too_large') e2.keyFail.reason += ' (also after making the request smaller)'; throw e2; }
         }
         // 2.3.17 (D, Abish's 1:26 AM screenshot): a key (the 2nd one, gpt-oss) wrote its tool call as harmony text
         // ("<|start|>assistant to=functions web search…json{…}<|call|>") instead of a real tool call. Read it back into a
         // real call and run it; if it can't be read, ask the same key once more, then the next key. Never sent as words.
+        if (answered) remember(answered);
         let h = readHarmony(resp, first.args);
         if (h.bad) {
           log('brain', `key "${k.name}": answered with tool-call text it did not run; asking once more`);
@@ -489,9 +584,23 @@ export async function callModel(args, opts = {}) {
   }
   const rows = keys.map(k => ({ name: k.name, reason: reasons.get(k.id) || 'did not answer' }));
   const off = aikeys.listRows().filter(r => !r.active).length;
-  throw userError(`I couldn't get an answer from any of your AI keys:\n${bullet(rows)}${off ? `\n(${off} more switched off.)` : ''}\nFix or add one in Settings → Brain (AI model) → AI keys.`);
+  const err = userError(`I couldn't get an answer from any of your AI keys:\n${bullet(rows)}${off ? `\n(${off} more switched off.)` : ''}\nFix or add one in Settings → Brain (AI model) → AI keys.`);
+  // 2.3.18: no key answered at all → the job saves his request and tries again later (retryWaiting)
+  const t2 = now();
+  const rest = keys.map(k => aikeys.keyRow(k.id)).filter(k => k && k.cool_until > t2).map(k => k.cool_until);
+  err.allKeysFailed = true; err.retryAt = rest.length ? Math.min(...rest) : 0;
+  throw err;
 }
 function userError(msg) { const e = new Error(msg); e.userMessage = msg; return e; }
+/** 2.3.18: per job (its tools list) and key, the tool names already sent — a key is never sent fewer later. */
+const SENT_TOOLS = new WeakMap();
+function sentToolsFor(tools, keyId) {
+  if (!Array.isArray(tools)) return new Set();
+  let m = SENT_TOOLS.get(tools); if (!m) { m = new Map(); SENT_TOOLS.set(tools, m); }
+  let set = m.get(String(keyId)); if (!set) { set = new Set(); m.set(String(keyId), set); }
+  return set;
+}
+export const WORDS_ONLY_NOTE = '[System note] Answer in plain words this time, without calling a tool: say briefly what you did and what you will do next.';
 /**
  * 2.3.17: harmony tool-call text in a model's answer → real tool calls (only tools this request offered).
  * Returns { resp, fixed: number of calls read back, bad: the answer was tool-call text that could not be read }.
@@ -877,6 +986,7 @@ export function systemPrompt(channel, opts = {}) {
     '- A site published on this server can have its own 404.html (in its top folder, in the site\'s style, with a link back to its home page): it is shown for any address in the site that does not exist. Without one, visitors get a plain built-in "Page not found" page. Add a 404.html when you build a real multi-page site.',
     ...SITE_SHOW_RULES,
     ...DESIGN_RULES,
+    ...RESOLVE_RULES,
     '- Checking a site (2.3.6): after building or changing a site, take a phone-size site_screenshot and look at the picture. Fix obvious problems (sideways scrolling, tiny text, broken pictures, things on top of each other, cut-off buttons), take one more screenshot to check, then share it. At most 2 rounds of fixes; then tell the owner what is left.',
     '- Videos (2.3.6): for a video request, plan the scenes first (picture, a few words, seconds each), make or collect the pictures (image_generate, his photos, project files), then render with video_make. It checks the length and size with ffprobe and shows you 2 frames: look at them before sending. If the words are wrong or cut off, fix and render again (at most twice), then send it.',
     ...browserGuide(),
@@ -891,7 +1001,124 @@ export function systemPrompt(channel, opts = {}) {
     '',
     'Things the owner asked you to remember:',
     facts.length ? facts.join('\n') : '(nothing yet)',
+    ...(opts.known && opts.known.length ? ['', ...opts.known] : []),
   ].join('\n');
+}
+
+// ---------------- 2.3.18: what he means by "my site" / "this site" ----------------
+// Abish, Nov 8 2:12 AM: "A designed page similar to my current site" → the assistant asked "Could you share the URL of
+// your current site…?" although he had asked for that page at 1:22 AM and its project already existed. Every request
+// now carries a short card — his projects and sites (newest first) and his earlier asks in this chat that are no longer
+// in the history it gets — in the system prompt, which is never cut to fit a small key.
+const KNOWN_PROJECTS = 8, KNOWN_ASKS = 5;
+function dirTime(p) { try { const st = fs.statSync(p); let t = st.mtimeMs; for (const f of fs.readdirSync(p).slice(0, 200)) { try { t = Math.max(t, fs.statSync(path.join(p, f)).mtimeMs); } catch {} } return t; } catch { return 0; } }
+export function knownSites() {
+  const here = new Map();
+  try { for (const n of fs.readdirSync(cfg.sitesDir)) here.set(n, { url: `${cfg.publicUrl}/sites/${n}/`, t: dirTime(path.join(cfg.sitesDir, n)) }); } catch {}
+  const rows = [];
+  try {
+    for (const d of fs.readdirSync(cfg.workspace, { withFileTypes: true })) {
+      if (!d.isDirectory() || d.name.startsWith('.')) continue;
+      const h = here.get(d.name);
+      rows.push({ name: d.name, t: Math.max(dirTime(path.join(cfg.workspace, d.name)), h?.t || 0), url: h?.url || '' });
+      here.delete(d.name);
+    }
+  } catch {}
+  for (const [n, h] of here) rows.push({ name: n, t: h.t, url: h.url });
+  try { for (const r of all("SELECT platform,name,url,updated FROM published WHERE platform IN ('cloudflare','github') ORDER BY updated DESC LIMIT 6")) rows.push({ name: r.name, t: r.updated || 0, url: r.url, platform: r.platform }); } catch {}
+  return rows.sort((a, b) => b.t - a.t).slice(0, KNOWN_PROJECTS);
+}
+function clockOf(t) {
+  try { return new Date(t).toLocaleString('en-US', { timeZone: setting('timezone') || 'UTC', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return ''; }
+}
+const WORK_WORDS = /\b(site|website|web ?page|page|html|logo|design|project|app|button|publish|domain|build|make)\b/i;
+const BARE_REPLY = /^\s*(yes|y|yep|ok|okay|approve|no|nope|thanks?|thank you|cool|good|great|👍|❤️)\b[\s\w#!.]{0,8}$/i;
+/** His earlier requests in this chat (past 24 h) older than the history the model gets (ids < firstId). */
+export function earlierAsks(chatId, firstId, limit = KNOWN_ASKS) {
+  if (!chatId || !firstId) return [];
+  const rows = all("SELECT id,text,ts FROM messages WHERE chat_id=? AND role='owner' AND id < ? AND ts > ? ORDER BY id DESC LIMIT 60", chatId, firstId, now() - 24 * 3600 * 1000)
+    .filter(r => String(r.text || '').trim().length > 8 && !BARE_REPLY.test(r.text) && !/^\[/.test(r.text));
+  // the newest few, plus his latest asks about building things (sites, pages, logos, apps) even when chat came after
+  const pick = new Map();
+  for (const r of rows.slice(0, Math.max(1, limit - 2))) pick.set(r.id, r);
+  for (const r of rows.filter(r => WORK_WORDS.test(r.text))) { if (pick.size >= limit + 1) break; pick.set(r.id, r); }
+  return [...pick.values()].sort((a, b) => a.id - b.id).map(r => ({ text: String(r.text).replace(/\s+/g, ' ').trim().slice(0, 220), ts: r.ts }));
+}
+export function knownContext({ chatId = null, firstHistoryId = null } = {}) {
+  const lines = [];
+  const sites = knownSites();
+  if (sites.length) {
+    lines.push('His projects and sites (newest first; the first is usually the one he is working on):');
+    for (const p of sites) lines.push(`- ${p.name}${p.url ? ' — ' + (p.platform === 'github' ? 'GitHub: ' : p.platform === 'cloudflare' ? 'Cloudflare Pages: ' : 'published at ') + p.url : ' (not published)'}${p.t ? ' (changed ' + clockOf(p.t) + ')' : ''}`);
+  }
+  const asks = earlierAsks(chatId, firstHistoryId);
+  if (asks.length) {
+    lines.push('His earlier requests in this chat (older than the messages below):');
+    for (const a of asks) lines.push(`- [${clockOf(a.ts)}] ${a.text}`);
+  }
+  return lines;
+}
+export const RESOLVE_RULES = [
+  '- "My site", "my current site", "this site", "the page", "it": work out which one he means from this chat (his earlier requests too), the projects and sites list below, and the things he asked you to remember (his own domain, e.g.). Use project_list / sites_list / file_read / memory_recall to check. Usually it is the project you worked on last. Only ask him when it is really unclear after looking — never ask for a URL or a name that is already here.',
+  '- "Similar to my current site" / "in the style of my site": read that site\'s files (file_read on its index.html/CSS) or open its address, and reuse its colours, fonts, logo and layout.',
+];
+
+// ---------------- 2.3.18: no key could answer → save the request, try again later ----------------
+// Abish, Nov 8 2:23 AM: "Only when it cant get any answer from any key". The key report he gets stays word for word;
+// one line is added. The request is tried again when the first resting key's rest ends (at most 15 min apart), for up
+// to 24 h, and then answered the normal way. A try that still gets no answer says nothing more.
+export const SAVED_LINE = 'I saved your request and will try again when a key is back.';
+export const RETRY_EVERY = 15 * 60000, RETRY_FOR = 24 * 3600 * 1000;
+export function nextTryAt(retryAt, t = now()) {
+  const soon = retryAt && retryAt > t ? retryAt + 30000 : t + RETRY_EVERY;
+  return Math.max(t + 60000, Math.min(soon, t + RETRY_EVERY));
+}
+function saveForRetry({ jobId, chatId, channel, ownerMsgs, text, hidden, parentApproval, meta, retryAt }) {
+  const r = run('INSERT INTO key_retries(job_id,chat_id,channel,msg_ids,text,hidden,parent_approval,meta,created,next_try,tries,status,last_job) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    jobId, chatId, channel, JSON.stringify(ownerMsgs.map(m => Number(m.id)).filter(Boolean)), hidden ? String(text || '') : null, hidden ? 1 : 0,
+    parentApproval || null, meta ? JSON.stringify(meta) : null, now(), nextTryAt(retryAt), 0, 'waiting', jobId);
+  const id = Number(r.lastInsertRowid);
+  audit('assistant', 'brain.saved_for_retry', `job ${jobId}: no AI key answered; saved (retry ${id}) for ${clockOf(nextTryAt(retryAt))}`);
+  return id;
+}
+/** A key that is not resting right now (or none). */
+function anyKeyFree() {
+  const t = now();
+  return aikeys.usableKeys({}).some(k => { const r = aikeys.keyRow(k.id); return r && r.active && !(r.cool_until > t) && r.problem !== 'model not found'; });
+}
+export function retryWaiting() {
+  const t = now();
+  const due = all("SELECT * FROM key_retries WHERE status='waiting' AND next_try <= ? ORDER BY id", t);
+  if (!due.length) return 0;
+  if (!anyKeyFree()) {
+    const rest = aikeys.usableKeys({}).map(k => aikeys.keyRow(k.id)).filter(r => r && r.cool_until > t).map(r => r.cool_until);
+    const at = nextTryAt(rest.length ? Math.min(...rest) : 0, t);
+    for (const r of due) {
+      if (t - r.created > RETRY_FOR) { run("UPDATE key_retries SET status='given_up' WHERE id=?", r.id); audit('assistant', 'brain.retry_given_up', `retry ${r.id} (job ${r.job_id}): no key answered for 24 h`); }
+      else run('UPDATE key_retries SET next_try=? WHERE id=?', at, r.id);
+    }
+    return 0;
+  }
+  let n = 0;
+  for (const r of due) {
+    if (t - r.created > RETRY_FOR) { run("UPDATE key_retries SET status='given_up' WHERE id=?", r.id); audit('assistant', 'brain.retry_given_up', `retry ${r.id} (job ${r.job_id}): no key answered for 24 h`); continue; }
+    run("UPDATE key_retries SET status='running', tries=tries+1 WHERE id=?", r.id);
+    let meta = null; try { meta = r.meta ? JSON.parse(r.meta) : null; } catch {}
+    let jobId = null;
+    if (r.hidden) jobId = startJob({ text: r.text || '', channel: r.channel || 'web', hidden: true, parentApproval: r.parent_approval || null, chatId: r.chat_id, meta, retryOf: r.id, title: 'Trying again' });
+    else {
+      let ids = []; try { ids = JSON.parse(r.msg_ids || '[]'); } catch {}
+      const msgs = ids.map(id => get("SELECT id,text,meta FROM messages WHERE id=? AND role='owner'", id)).filter(Boolean)
+        .map(m => { let mm = null; try { mm = m.meta ? JSON.parse(m.meta) : null; } catch {} return { id: Number(m.id), text: m.text, meta: mm, fileRows: filesOfMessage(m.id) }; });
+      if (!msgs.length) { run("UPDATE key_retries SET status='gone' WHERE id=?", r.id); continue; }
+      if (meta && !msgs[msgs.length - 1].meta) msgs[msgs.length - 1].meta = meta;
+      jobId = jobForStored(msgs, r.channel || 'web', r.chat_id, { retryOf: r.id });
+    }
+    run('UPDATE key_retries SET last_job=? WHERE id=?', jobId, r.id);
+    audit('assistant', 'brain.retry', `retry ${r.id}: trying his saved request again (job ${jobId})`);
+    n++;
+  }
+  return n;
 }
 
 // ---------------- jobs ----------------
@@ -957,12 +1184,12 @@ function joinBatch(b, m) {
   log('job', b.jobId, `message ${b.msgs.length} joined (${b.state})`);
 }
 /** A new job for messages of his that are already stored (left over when a job ended without reading them). */
-function jobForStored(msgs, channel, chatId) {
+function jobForStored(msgs, channel, chatId, { retryOf = null } = {}) {
   const last = msgs[msgs.length - 1];
   const r = run('INSERT INTO jobs(channel,status,title,progress,created,updated,parent_approval,meta,chat_id,parent_job) VALUES(?,?,?,?,?,?,?,?,?,?)',
     channel, 'queued', String(msgs[0].text || '').slice(0, 120) || 'Message', 'Waiting to start', now(), now(), null, last.meta ? JSON.stringify(last.meta) : null, chatId, null);
   const id = Number(r.lastInsertRowid);
-  const entry = { id, text: msgs[0].text, channel, meta: last.meta, hidden: false, before: msgs[0].id, chatId, fileRows: msgs[0].fileRows || [], parentJob: null };
+  const entry = { id, text: msgs[0].text, channel, meta: last.meta, hidden: false, before: msgs[0].id, chatId, fileRows: msgs[0].fileRows || [], parentJob: null, retryOf };
   const b = { key: chatId + ':' + channel, chatId, channel, jobId: id, state: 'queued', msgs: msgs.slice(), inbox: [], firstAt: Date.now(), timer: null, entry, ctx: null };
   entry.batch = b;
   if (!batches.has(b.key)) batches.set(b.key, b);
@@ -970,7 +1197,7 @@ function jobForStored(msgs, channel, chatId) {
   return id;
 }
 
-export function startJob({ text, channel = 'web', meta = null, hidden = false, title = '', parentApproval = null, chatId = null, files = [], parentJob = null }) {
+export function startJob({ text, channel = 'web', meta = null, hidden = false, title = '', parentApproval = null, chatId = null, files = [], parentJob = null, retryOf = null }) {
   const chat = chatId && chatById(chatId) ? Number(chatId) : mainChatId();
   text = String(text || '');
   if (files && files.length) validateUnsent(files);
@@ -987,7 +1214,7 @@ export function startJob({ text, channel = 'web', meta = null, hidden = false, t
   const r = run('INSERT INTO jobs(channel,status,title,progress,created,updated,parent_approval,meta,chat_id,parent_job) VALUES(?,?,?,?,?,?,?,?,?,?)',
     channel, 'queued', (title || label).slice(0, 120), canBatch ? WAITING_LABEL : 'Waiting to start', now(), now(), parentApproval, meta ? JSON.stringify(meta) : null, chat, parentJob || null);
   const id = Number(r.lastInsertRowid);
-  const entry = { id, text, channel, meta, hidden, before, chatId: chat, fileRows, parentJob };
+  const entry = { id, text, channel, meta, hidden, before, chatId: chat, fileRows, parentJob, retryOf };
   if (canBatch) {
     const b = { key, chatId: chat, channel, jobId: id, state: 'collecting', msgs: [{ id: before, text, meta, fileRows }], inbox: [], firstAt: Date.now(), timer: null, entry, ctx: null };
     entry.batch = b;
@@ -1046,6 +1273,7 @@ function history(limit, beforeId, chatId, budget = MAX_INLINE) {
     if (l && l.role === it.role) { l.text = [l.text, it.text].filter(Boolean).join('\n'); if (it.media) l.media = [...(l.media || []), ...it.media]; }
     else out.push({ ...it });
   }
+  out.firstId = rows.length ? Math.min(...rows.map(r => Number(r.id))) : beforeId;     // 2.3.18: older asks go in the known-context card
   return out;
 }
 
@@ -1103,7 +1331,7 @@ export function toldAfterYes(approvalId) {
   if (!a || a.status !== 'done') return null;
   try { return doneMessage(a.tool, JSON.parse(a.args), JSON.parse(a.result || 'null')); } catch { return null; }
 }
-async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRows, parentJob, batch }) {
+async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRows, parentJob, batch, retryOf = null }) {
   const b = batch || null;
   const job = get('SELECT * FROM jobs WHERE id=?', id);
   if (!job || job.status === 'cancelling') {
@@ -1137,7 +1365,7 @@ async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRow
   // words in this chat from the past hour stand in)
   ctx.askedText = () => (ownerMsgs.length ? ownerMsgs.map(m => m.text || '').join('\n') : (hidden && !isHelper ? recentOwnerWords(ctx.chatId) : ''));
   let designNudged = false;
-  let final = '', steps = 0, refolds = 0, leftover = [];
+  let final = '', steps = 0, refolds = 0, leftover = [], quietRetry = false;
   // 2.3.7: Natural reactions. A "real request" = this job used at least one tool other than react (chit-chat, a bare
   // thanks/ok or a question answered from memory use none). First such tool → 👍 on his message; finished well → ✅.
   // 2.3.15: on his newest message at that moment; the ✅ goes on the same one.
@@ -1184,7 +1412,10 @@ async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRow
   };
   try {
     const tools = declarations({ helper: isHelper });
-    const system = systemPrompt(channel, { hidden: !!hidden || channel === 'system' });
+    const chatNow = ctx.chatId || mainChatId();
+    let known = [];
+    try { known = knownContext({ chatId: chatNow, firstHistoryId: isHelper ? before : (items.firstId || before) }); } catch (e) { log('job', id, 'known context:', e.message); }
+    const system = systemPrompt(channel, { hidden: !!hidden || channel === 'system', known });
     for (;;) {
       if (get('SELECT status FROM jobs WHERE id=?', id).status === 'cancelling') { final = 'Stopped, as you asked.'; break; }
       foldIn(null);
@@ -1246,11 +1477,28 @@ async function runJob({ id, text, channel, meta, hidden, before, chatId, fileRow
   } catch (e) {
     leftover = closeBatch(b);
     final = e.userMessage ? redact(e.userMessage) : 'Sorry, that failed: ' + redact(e.message);
-    run("UPDATE jobs SET status='error', result=?, updated=? WHERE id=?", final, now(), id);
+    // 2.3.18: no key answered at all → his request is saved and tried again later (the key report + one line)
+    const keepIt = e.allKeysFailed && !isHelper && channel !== 'system' && (ownerMsgs.length || job.parent_approval);
+    if (keepIt && retryOf) {
+      run("UPDATE key_retries SET status='waiting', next_try=? WHERE id=? AND status='running'", nextTryAt(e.retryAt), retryOf);
+      run("UPDATE jobs SET status='error', result=?, updated=? WHERE id=?", '(still no AI key answered; trying again later)', now(), id);
+      log('job', id, 'retry: still no key answered; next try', clockOf(nextTryAt(e.retryAt)));
+      quietRetry = true;
+    } else {
+      if (keepIt) {
+        try {
+          saveForRetry({ jobId: id, chatId: ctx.chatId || job.chat_id, channel, ownerMsgs, text, hidden: !ownerMsgs.length, parentApproval: job.parent_approval, meta: ctx.meta, retryAt: e.retryAt });
+          final += '\n' + SAVED_LINE;
+        } catch (e2) { log('job', id, 'could not save for retry:', e2.message); }
+      } else if (retryOf) run("UPDATE key_retries SET status='failed' WHERE id=?", retryOf);
+      run("UPDATE jobs SET status='error', result=?, updated=? WHERE id=?", final, now(), id);
+    }
     log('job', id, 'error', e.message);
   }
   if (leftover.length) jobForStored(leftover, channel, b.chatId);
+  if (retryOf && !quietRetry && get('SELECT status FROM jobs WHERE id=?', id)?.status === 'done') run("UPDATE key_retries SET status='done' WHERE id=?", retryOf);
   event(id, 'end', final.slice(0, 300));
+  if (quietRetry) { if (b) closeBatch(b); return ''; }
   if (isHelper) return looksLikeReplies(final) ? (repliesToPlain(final).text || final) : final;   // a helper's answer goes back to its parent job (helpers_wait), not to the chat
   const status = get('SELECT status FROM jobs WHERE id=?', id)?.status;
   // 2.3.16 (Abish, Nov 8): (1) the replies JSON never reaches him as text — where it is not read as a list (a job

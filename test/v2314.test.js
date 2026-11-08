@@ -382,7 +382,8 @@ test('the final message when nothing answers is unchanged, and no key ever reach
   const { job } = await ask('ALWAYS413 again');
   assert.equal(job.status, 'error');
   assert.match(job.result, /^I couldn't get an answer from any of your AI keys:\n• Second provider: request too large for this key's limit \(413\)/);
-  assert.match(job.result, /Fix or add one in Settings → Brain \(AI model\) → AI keys\.$/);
+  // 2.3.18 (Abish: "Only when it cant get any answer from any key"): the report is word for word the same, plus one line
+  assert.match(job.result, /Fix or add one in Settings → Brain \(AI model\) → AI keys\.\nI saved your request and will try again when a key is back\.$/);
   const all = LOGS.join('\n') + RAW.join('\n') + JSON.stringify(db.all('SELECT * FROM audit')) + JSON.stringify(db.all('SELECT * FROM job_events'));
   for (const k of [GEM3, GEMSTRICT, GEMOUT, SMALLK, OTHERK, FIRSTK, ...Object.values(TOK)]) assert.ok(!all.includes(k), 'a key leaked');
 });

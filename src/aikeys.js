@@ -392,6 +392,13 @@ export function tooLarge(status, msg) {
   return { kind: 'too_large', reason: `request too large for this key's limit (${status || 413})` + (msg ? ': ' + short(msg, 90) : ''), until: 0, limit, requested };
 }
 
+const TOOL_MISSING = /attempted to call tool ['"`]?([A-Za-z0-9_.\- ]{1,64}?)['"`]? which was not in request\.tools/i;
+export function toolMissing(status, text) {
+  if (status !== 400) return null;
+  const m = TOOL_MISSING.exec(String(text || '')) || (/tool call validation failed/i.test(String(text || '')) ? [] : null);
+  if (!m) return null;
+  return { kind: 'tool_missing', tool: m[1] ? m[1].trim() : '', reason: `error 400: ${short(providerMessage(text) || 'tool call validation failed')}`, until: 0 };
+}
 /** 2.3.14: the request-size cap (tokens) for a key, or 0 for none: what a 413 taught us, else a known-small provider. */
 export const GROQ_FREE_TPM = 8000;          // Groq's free plan: 6,000–12,000 tokens per minute per model (8,000 for gpt-oss-120b)
 export function sizeCap(r) {
@@ -417,6 +424,11 @@ export function classify({ status = 0, text = '', headers = null, provider = 'ge
   // the model's context), not about the key: the brain retries once on the same key with a smaller request.
   const tl = tooLarge(status, msg);
   if (tl) return tl;
+  // 2.3.18: "400 Tool call validation failed: attempted to call tool 'file_write' which was not in request.tools" — the
+  // model called a tool this request did not carry. About THIS request, not the key: the brain asks the same key once
+  // more with that tool (or for words only), then the next key.
+  const tm = toolMissing(status, text);
+  if (tm) return tm;
   if (status === 429 || /RESOURCE_EXHAUSTED/.test(text) || (status >= 400 && /quota/i.test(msg) && status !== 404)) {
     const perDay = /PerDay|per[ _-]?day|daily|\bRPD\b|\bTPD\b|limit:\s*0\b/i.test(text);
     if (provider === 'gemini' && perDay) {

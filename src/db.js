@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, ts INTEGER);
 CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, created INTEGER, updated INTEGER);
 CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT, mime TEXT, size INTEGER, kind TEXT, created INTEGER, chat_id INTEGER, message_id INTEGER);
 CREATE TABLE IF NOT EXISTS reactions (message_id INTEGER PRIMARY KEY, emoji TEXT, ts INTEGER, auto INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS key_retries (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, chat_id INTEGER, channel TEXT, msg_ids TEXT, text TEXT, hidden INTEGER DEFAULT 0, parent_approval INTEGER, meta TEXT, created INTEGER, next_try INTEGER, tries INTEGER DEFAULT 0, status TEXT DEFAULT 'waiting', last_job INTEGER);
 CREATE INDEX IF NOT EXISTS idx_msg_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_ev_job ON job_events(job_id);
 CREATE INDEX IF NOT EXISTS idx_ap_status ON approvals(status);
