@@ -11,8 +11,9 @@ export async function ownerSaid(channel, text, meta = null, files = []) {
   if (!t) return '';
   const d = parseDecision(t);
   if (d) {
-    addMessage('owner', channel, t);
-    const r = await decide(d.id, d.yes, channel);
+    addMessage('owner', channel, t, meta);        // 2.3.16: with his message id, so the follow-up can react to his YES
+    if (d.ask) { addMessage('notice', channel, d.ask); return d.ask; }   // 2.3.16: two different requests are open: which one?
+    const r = await decide(d.id, d.yes, channel, meta);
     addMessage('notice', channel, r.message);
     return r.message;
   }

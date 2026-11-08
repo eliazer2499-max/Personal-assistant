@@ -186,19 +186,21 @@ test('Natural cap: the moved emoji obeys it (3rd in a row is not sent, the line 
   const a2 = await fromHim(say('✅\nfourth done')); await replyArrives(a2.before, /^fourth done$/); await until(() => reactsOn(a2.id).length, 4000, 'reaction a2');
   const b2 = await fromHim(say('✅\nfifth done')); await replyArrives(b2.before, /^fifth done$/); await until(() => reactsOn(b2.id).length, 4000, 'reaction b2');
   const d = await fromHim(say('👍'));
-  await replyArrives(d.before, /^👍$/);
+  await until(() => moved().some(x => /the reply was only 👍; not sent/.test(x)), 4000, 'dropped');   // 2.3.16: never a bare 👍 message
+  assert.equal(textsAfter(d.before).filter(t => /^👍$/.test(t)).length, 0);
   assert.equal(reactsOn(d.id).length, 0);
 });
 
-test('Off: the line is stripped without reacting; an emoji-only reply goes as text', async () => {
+test('Off: the line is stripped without reacting; an emoji-only reply is not sent (2.3.16)', async () => {
   let r = await call('/api/wa-agent/react', { mode: 'off' }); assert.equal(r.j.react_mode, 'off');
   db.setSetting('wa_agent_react_recent', '[]');
   const m = await fromHim(say(BUG));
   const t = await replyArrives(m.before, /^Reminder set/);
   assert.doesNotMatch(t, /✅/);
   const o = await fromHim(say('✅'));
-  await replyArrives(o.before, /^✅$/);
+  await until(() => moved().some(x => /the reply was only ✅; not sent \(Reactions are Off\)/.test(x)), 4000, 'dropped');
   await sleep(200);
+  assert.equal(textsAfter(o.before).filter(t => /^✅$/.test(t)).length, 0, '2.3.16: no bare ✅ message');
   assert.equal(reactsOn(m.id).length + reactsOn(o.id).length, 0, 'no reactions at all when Off');
   assert.ok(moved().some(x => /removed ✅ from the text; no reaction \(Reactions are Off\)/.test(x)));
 });
@@ -230,7 +232,8 @@ test('a reaction failure never breaks the reply', async () => {
     await replyArrives(m.before, /^Saved it\.$/);
     await until(() => db.all("SELECT 1 AS x FROM audit WHERE action='wa_agent.react_failed' AND detail LIKE '%moved ✅ out of the text%'").length, 3000, 'the failure in Activity');
     const o = await fromHim(say('👍'));
-    await replyArrives(o.before, /^👍$/);      // emoji-only + failed reaction → sent as text
+    await until(() => moved().some(x => /the reply was only 👍; not sent/.test(x)), 4000, 'dropped');   // 2.3.16: emoji-only + failed reaction → nothing (never a bare 👍 message)
+    assert.equal(textsAfter(o.before).filter(t => /^👍$/.test(t)).length, 0);
   } finally { AP.failReact = 0; }
 });
 

@@ -111,6 +111,7 @@ test('multi-step job with tools; email to someone else waits for approval; appro
   const pend = (await call('/api/approvals')).j.approvals;
   assert.equal(pend.length, 1); assert.equal(pend[0].tool, 'gmail_send');
   if (haveSshd) assert.match(lastAssistant(j), /root disk: \S+ used of \S+/);
+  assert.doesNotMatch(lastAssistant(j), /waiting for your OK/, '2.3.16: the approval request is not repeated in the answer');
   r = await call('/api/approvals/' + pend[0].id, { yes: true });
   assert.equal(r.j.ok, true, JSON.stringify(r.j));
   assert.equal(fake.state.sent.length, 1);
@@ -128,7 +129,9 @@ test('ssh_run: read-only runs at once, a change waits for YES', async () => {
   assert.match(lastAssistant(j), /Uptime: .*load average/);
   r = await call('/api/chat', { text: 'restart nginx on local' });
   j = await idle(15000);
-  assert.match(lastAssistant(j), /waiting for your OK \(A\d+\)/);
+  // 2.3.16: the approval request (its own message) is the answer; no second "waiting for your OK" message
+  assert.doesNotMatch(lastAssistant(j), /waiting for your OK/);
+  assert.ok(j.messages.some(m => m.role === 'approval' && /^Needs your OK \(A\d+\)/.test(m.text)));
   const ap = (await call('/api/approvals')).j.approvals.find(a => a.tool === 'ssh_run');
   assert.match(ap.summary, /sudo systemctl restart nginx/);
   r = await call('/api/approvals/' + ap.id, { yes: false }); assert.match(r.j.message, /Cancelled/);

@@ -162,7 +162,12 @@ async function capture(c, sid, size, fullPage) {
 }
 
 /** Open url at each size and capture. */
-export async function screenshotUrl(url, { sizes = [PHONE], fullPage = false, waitMs = 800 } = {}) {
+// 2.3.16 (Abish, Nov 8: the picture caught soft-tech.net's loading splash, he had to say "wait a sec and then send"):
+// after the page loads, wait until the network is quiet (no request for 0.5 s, at most 10 s), then let it settle
+// (3 s by default; wait_ms 0–15000) before taking the picture.
+export const SETTLE_DEFAULT_MS = 3000, SETTLE_MAX_MS = 15000, IDLE_QUIET_MS = 500, IDLE_MAX_MS = 10000;
+export const settleMs = (v) => { const n = Number(v); return Number.isFinite(n) && v !== undefined && v !== null && v !== '' ? Math.max(0, Math.min(SETTLE_MAX_MS, Math.round(n))) : SETTLE_DEFAULT_MS; };
+export async function screenshotUrl(url, { sizes = [PHONE], fullPage = false, waitMs = SETTLE_DEFAULT_MS } = {}) {
   const bin = findChromium();
   if (!bin) { const e = new Error(NO_BROWSER); e.noBrowser = true; throw e; }
   return oneAtATime(async () => {
@@ -174,14 +179,18 @@ export async function screenshotUrl(url, { sizes = [PHONE], fullPage = false, wa
       const { sessionId: sid } = await c.send('Target.attachToTarget', { targetId, flatten: true });
       const errors = [];
       let loaded = null;
+      const inflight = new Set(); let lastNet = Date.now();
       c.on((m) => {
         if (m.sessionId !== sid) return;
+        if (m.method === 'Network.requestWillBeSent') { inflight.add(m.params.requestId); lastNet = Date.now(); }
+        else if (m.method === 'Network.loadingFinished' || m.method === 'Network.loadingFailed') { inflight.delete(m.params.requestId); lastNet = Date.now(); }
         if (m.method === 'Page.loadEventFired' && loaded) loaded();
         else if (m.method === 'Runtime.exceptionThrown' && errors.length < 8) errors.push('script error: ' + String(m.params.exceptionDetails?.exception?.description || m.params.exceptionDetails?.text || '').split('\n')[0].slice(0, 200));
         else if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error' && errors.length < 8) errors.push('console: ' + (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ').slice(0, 200));
         else if (m.method === 'Log.entryAdded' && m.params.entry?.level === 'error' && errors.length < 8) errors.push(String(m.params.entry.text || '').slice(0, 160) + (m.params.entry.url ? ' ' + m.params.entry.url.slice(0, 120) : ''));
       });
       await c.send('Page.enable', {}, sid); await c.send('Runtime.enable', {}, sid); await c.send('Log.enable', {}, sid);
+      await c.send('Network.enable', {}, sid).catch(() => {});
       const shots = [];
       for (let i = 0; i < sizes.length; i++) {
         const size = sizes[i];
@@ -191,6 +200,8 @@ export async function screenshotUrl(url, { sizes = [PHONE], fullPage = false, wa
         if (nav.errorText) throw new Error('The page did not open: ' + nav.errorText + ' (' + url + ')');
         await Promise.race([done, sleep(25000)]);
         await c.send('Runtime.evaluate', { expression: 'document.fonts ? document.fonts.ready.then(() => 1) : 1', awaitPromise: true }, sid, 10000).catch(() => {});
+        const idleEnd = Date.now() + IDLE_MAX_MS;                   // network quiet (long-polling pages: at most 10 s)
+        while (Date.now() < idleEnd && (inflight.size || Date.now() - lastNet < IDLE_QUIET_MS)) await sleep(100);
         await sleep(waitMs);
         shots.push({ size, ...(await capture(c, sid, size, fullPage)) });
       }
@@ -213,13 +224,14 @@ export const siteScreenshot = {
     site: S('Name of a site published on this server (publish_site) to open'),
     url: S('A web address (https://…) to open instead'),
     desktop: { type: 'boolean', description: 'Also take a desktop-size picture (1366×900)' },
-    full_page: { type: 'boolean', description: 'Capture the whole page height (up to 6000 px), not just the first screen' },
+    full_page: { type: 'boolean', description: 'Capture the whole page height (up to 6000 px), not just the first screen (still phone width)' },
+    wait_ms: { type: 'number', description: 'Extra wait after the page has loaded and gone quiet, in milliseconds (default 3000, max 15000). Raise it for a page with a long loading animation.' },
     send_to_owner: { type: 'boolean', description: 'Also send the phone screenshot to the owner (send_file)' },
     caption: S('Text to go with the picture when sending'),
   },
   required: [],
   run: async (a = {}, ctx = {}) => {
-    const { project, path: rel, site, url, desktop, full_page, send_to_owner, caption } = a;
+    const { project, path: rel, site, url, desktop, full_page, send_to_owner, caption, wait_ms } = a;
     if (!project && !site && !url) return { error: 'Say what to open: project (its files), site (published here) or url.' };
     if (!findChromium()) return { error: NO_BROWSER, setup_command: BROWSER_CMD };
     let target, server = null;
@@ -240,7 +252,7 @@ export const siteScreenshot = {
         target = server.base + path.relative(fs.realpathSync(dir), fs.realpathSync(file)).split(path.sep).map(encodeURIComponent).join('/');
       }
       const sizes = desktop ? [PHONE, DESKTOP] : [PHONE];
-      const r = await screenshotUrl(target, { sizes, fullPage: !!full_page });
+      const r = await screenshotUrl(target, { sizes, fullPage: !!full_page, waitMs: settleMs(wait_ms) });
       // where to save: the project given, else the published site's name, else "screenshots"
       const saveProject = project ? safeName(project, 'project') : site ? safeName(site, 'project') : 'screenshots';
       const label = (site || (url ? new URL(url).hostname : '') || path.basename(rel || 'index', '.html') || 'page').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'page';

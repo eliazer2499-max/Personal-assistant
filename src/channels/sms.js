@@ -80,6 +80,6 @@ export async function sendSms(to, text) {
 export async function sendOwner(text, opts = {}) {
   const to = opts.meta?.sms_from || allowList()[0];
   if (!to) throw new Error('No owner phone number saved for SMS');
-  const t = opts.approvalId ? String(text).replace(/\n\nReply YES[\s\S]*$/, '') .slice(0, 600) + `\nReply YES A${opts.approvalId} or NO A${opts.approvalId}` : text;
+  const t = opts.approvalId ? String(text).replace(/\n\nReply YES[\s\S]*$/, '') .slice(0, 600) + (/Reply YES A\d+/.test(String(text)) ? `\nReply YES A${opts.approvalId} or NO A${opts.approvalId}` : '\nReply YES or NO') : text;   // 2.3.16: the code only when 2+ wait
   return sendSms(to, t);
 }

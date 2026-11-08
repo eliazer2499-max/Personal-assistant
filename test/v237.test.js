@@ -228,7 +228,7 @@ test('Natural: a job that ends waiting for his YES keeps 👍; after YES the app
   await sleep(2100);
   fs.mkdirSync(path.join(SITES, 'yes-site'), { recursive: true }); fs.writeFileSync(path.join(SITES, 'yes-site', 'index.html'), 'hi');
   const m = await fromHim('UNPUB here yes-site');
-  await replyArrives(m.before, /waiting_for_owner_approval/);
+  await replyArrives(m.before, /^Needs your OK \(A\d+\)/);     // 2.3.16: the approval request is the one message (no echo of it)
   await sleep(300);
   assert.deepEqual(reactsOn(m.id), ['👍'], 'no ✅ yet');
   assert.ok(fs.existsSync(path.join(SITES, 'yes-site')), 'nothing deleted before his YES');
@@ -349,7 +349,7 @@ test('GitHub: a repo it did not publish can never be deleted (web or chat), and 
 test('Chat: unpublish_site takes down a Cloudflare site only after his YES (approval flow)', async () => {
   CF.calls.length = 0;
   const job = await ask('UNPUB cloudflare proj-b delete');
-  assert.match(job.result, /waiting_for_owner_approval/);
+  assert.match(job.result, /^\(the approval request A\d+ was the answer\)$/);   // 2.3.16: no second message about it
   const ap = db.get("SELECT * FROM approvals WHERE tool='unpublish_site' ORDER BY id DESC");
   assert.equal(ap.status, 'pending'); assert.match(ap.summary, /Delete the Cloudflare Pages project "proj-b"/);
   assert.deepEqual(CF.calls, [], 'nothing deleted before YES');

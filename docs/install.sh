@@ -330,15 +330,28 @@ write_file /etc/caddy/Caddyfile 644 root:root <<EOF
 $GLOBAL
 $SITE_ADDR {
 	encode gzip
-	handle_path /sites/* {
-		root * $SRV/sites
+	handle /sites/* {
+		root * $SRV
 		file_server
+	}
+	# 2.3.16: a page that is not there (or a site that is not there) gets the app's 404 page, not a blank one
+	handle_errors {
+		@site404 expression "{err.status_code} == 404 && {path}.startsWith('/sites/')"
+		handle @site404 {
+			reverse_proxy 127.0.0.1:$PORT
+		}
 	}
 	handle {
 		reverse_proxy 127.0.0.1:$PORT
 	}
 }
 EOF
+
+# 2.3.16: if this Caddy can't read the new 404 rule (a very old Caddy), keep the earlier, simpler file so HTTPS stays up
+if [ "$DRY" != 1 ] && command -v caddy >/dev/null 2>&1 && ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+  sed -i '/# 2.3.16: a page that is not there/,/^\t}$/d' /etc/caddy/Caddyfile
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || echo "Note: caddy validate reports a problem with /etc/caddy/Caddyfile (see: caddy validate --config /etc/caddy/Caddyfile)"
+fi
 
 # ---------- firewall on this machine ----------
 say "Opening ports 80 and 443 on this machine's firewall"

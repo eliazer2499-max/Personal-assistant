@@ -1,5 +1,6 @@
 // My Assistant v2 web app (vanilla JS, no build step).
 import { browserSettingsView, liveView } from './browser-ui.js';   // 2.3.8
+import { renderMarkdown, previewText } from './markdown.js';       // 2.3.16: **bold**, lists, links in replies
 const $root = document.getElementById('root');
 let CSRF = '', ME = null, pollTimer = null, lastMsgId = 0, PENDING = 0;
 
@@ -446,8 +447,14 @@ function addBubble(m, approvalStatus) {
     const allVoice = files.length && (m.files || []).every(f => f.kind === 'audio');
     log.append(h('div', { class: 'bubble ' + (m.role === 'owner' ? 'owner' : m.role === 'assistant' ? 'assistant' : 'notice') + (files.length ? ' hasfiles' : '') + (allVoice && voiceOnly ? ' voice' : ''), 'data-msg': m.id || null },
       m.role === 'assistant' && m.meta && m.meta.reply_to ? quoteEl(m.meta) : null,
-      files, voiceOnly ? null : (m.text ? h('div', { class: 'btext' }, shownText(m)) : null), via));
+      files, voiceOnly ? null : (m.text ? textEl(m) : null), via));
   }
+}
+// 2.3.16: the assistant's replies (and notices) show their formatting: **bold**, lists, links, code. His own
+// messages stay exactly as he typed them. renderMarkdown escapes everything first (see markdown.js).
+function textEl(m) {
+  if (m.role === 'owner') return h('div', { class: 'btext' }, shownText(m));
+  return h('div', { class: 'btext md', html: renderMarkdown(shownText(m)) });
 }
 // 2.3.15: an answer to one of several messages shows which one it answers (a quote, like a reply in a messenger).
 // Tapping the quote scrolls to his message and flashes it.
@@ -455,7 +462,7 @@ function quoteEl(meta) {
   return h('div', { class: 'quote', role: 'button', tabindex: '0', title: 'Reply to your message', onclick: () => {
     const t = document.querySelector('.bubble.owner[data-msg="' + Number(meta.reply_to) + '"]');
     if (t) { t.scrollIntoView({ behavior: 'smooth', block: 'center' }); t.classList.remove('flash'); void t.offsetWidth; t.classList.add('flash'); }
-  } }, String(meta.quote || ''));
+  } }, previewText(meta.quote || '', 160));
 }
 // 2.3.15: the assistant's reaction on his message, in the corner of his bubble (like a tapback).
 function paintReactions(log, map) {
@@ -506,9 +513,9 @@ function renderJob(j, events) {
     return;
   }
   const evs = events.filter(e => e.job_id === j.id && ['tool', 'result', 'error', 'approval', 'note'].includes(e.kind));
-  const list = h('ol', {}, evs.filter(e => e.kind !== 'result').slice(-12).map(e => e.kind === 'tool' ? h('li', { class: 'tool' }, h('b', {}, e.text.split(' ')[0]), ' ' + e.text.split(' ').slice(1).join(' ').slice(0, 140)) : h('li', { class: e.kind === 'error' ? 'err' : e.kind === 'approval' ? 'ap' : '' }, e.kind === 'approval' ? 'Waiting for your OK (see card)' : e.text.slice(0, 200))));
+  const list = h('ol', {}, evs.filter(e => e.kind !== 'result').slice(-12).map(e => e.kind === 'tool' ? h('li', { class: 'tool' }, h('b', {}, e.text.split(' ')[0]), ' ' + e.text.split(' ').slice(1).join(' ').slice(0, 140)) : h('li', { class: e.kind === 'error' ? 'err' : e.kind === 'approval' ? 'ap' : '' }, e.kind === 'approval' ? 'Waiting for your OK (see card)' : previewText(e.text, 200))));
   const stop = h('button', { class: 'small', onclick: async () => { stop.disabled = true; await api('/api/jobs/' + j.id + '/cancel', {}); } }, 'Stop');
-  const node = h('div', { class: 'job', 'data-job': j.id }, h('div', { class: 'head' }, h('span', {}, h('span', { class: 'spin', 'aria-hidden': 'true' }), `Working · step ${j.steps || 0} · ${j.progress || ''}`.slice(0, 90)), stop), evs.length ? list : null, h('ul', { class: 'subs' }));
+  const node = h('div', { class: 'job', 'data-job': j.id }, h('div', { class: 'head' }, h('span', {}, h('span', { class: 'spin', 'aria-hidden': 'true' }), `Working · step ${j.steps || 0} · ${previewText(j.progress || '')}`.slice(0, 90)), stop), evs.length ? list : null, h('ul', { class: 'subs' }));
   if (el) el.replaceWith(node); else log.append(node);
 }
 async function refreshChat(scroll) {
@@ -556,7 +563,7 @@ function chatsView() {
       const pin = c.id === r.main ? null : h('button', { class: 'small', type: 'button', 'aria-label': 'Make main chat', title: 'Make this the main chat (Telegram/WhatsApp/SMS/email, reminders and scheduled jobs arrive in the main chat)', onclick: async () => { await api('/api/chats/' + c.id + '/main', {}); load(); } }, '📌');
       return h('div', { class: 'item chatitem' + (c.id === CHAT_ID ? ' on' : '') },
         h('a', { href: '#/chat/' + c.id, class: 'chatlink' }, h('div', { class: 'ct' }, c.title, c.id === r.main ? h('span', { class: 'pill', title: 'Messages from your other channels, reminders and scheduled jobs arrive here' }, 'main') : null),
-          h('span', { class: 'sub' }, (c.last || 'No messages yet').slice(0, 80) + ' · ' + ago(c.updated))),
+          h('span', { class: 'sub' }, (previewText(c.last, 80) || 'No messages yet') + ' · ' + ago(c.updated))),
         h('div', { class: 'row', style: 'gap:6px;flex:none' }, pin, ren, del));
     }), h('p', { class: 'fine' }, 'Tasks, reminders, memory and settings are shared by all chats. The "main" chat also gets your Telegram/WhatsApp/SMS/email messages, reminders and scheduled jobs.'));
   }

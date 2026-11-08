@@ -152,13 +152,13 @@ test('react first, then answer: a job gets 👍 on his message AND a reply in wo
   await until(async () => (await call('/api/chat?chat=' + chat)).j.reactions[own.id] === '✅', 3000, '✅ after the answer');
 });
 
-test('reactions Off: no reaction tool, NO_REPLY becomes a plain "👍" text', async () => {
+test('reactions Off: no reaction tool; NO_REPLY sends nothing (2.3.16: never a bare "👍" message)', async () => {
   db.setSetting('reactions', '0');
   try {
     const chat = await newChat();
     let j = await waitJob(await say(chat, 'THANKS'));
-    assert.match(j.result, /^👍$/);
-    assert.deepEqual(replies(chat), ['👍']);
+    assert.match(j.result, /^\(no reply; the reaction could not be placed\)$/);
+    assert.deepEqual(replies(chat), []);
     assert.deepEqual((await call('/api/chat?chat=' + chat)).j.reactions, {});
   } finally { db.setSetting('reactions', '1'); }
 });

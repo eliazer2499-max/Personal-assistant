@@ -27,6 +27,7 @@ import { normalizeSource, label as srcLabel } from './release-source.js';
 import * as chats from './chats.js';
 import * as files from './files.js';
 import * as sitesMod from './sites.js';
+import { serveSite } from './siteserve.js';
 
 const PUB = path.join(APP_DIR, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.json': 'application/json', '.ico': 'image/x-icon' };
@@ -120,6 +121,7 @@ R('POST', /^\/api\/chat$/, (c) => {
   if (!text && !fileIds.length) throw auth.httpErr(400, 'Empty message');
   const chatId = chatParam(c.body.chat_id);
   const d = !fileIds.length && approvals.parseDecision(text);
+  if (d && d.ask) { addMessage('owner', 'web', text, null, null, chatId); addMessage('notice', 'web', d.ask, null, null, chatId); return { ok: true, ask: d.ask }; }   // 2.3.16
   if (d) { return approvals.decide(d.id, d.yes, 'web').then(r => { addMessage('notice', 'web', r.message, null, null, chatId); return { ok: true, decided: r }; }); }
   return { job: startJob({ text: text.slice(0, 20000), channel: 'web', chatId, files: fileIds }), chat_id: chatId };
 });
@@ -392,6 +394,7 @@ async function handle(req, res) {
       }
       return send(res, 404, { error: 'No such API' });
     }
+    if (p === '/sites' || p.startsWith('/sites/')) { if (serveSite(req, res)) return; }   // 2.3.16: published sites, with a 404 page
     if ((req.method === 'GET' || req.method === 'HEAD') && serveStatic(res, p, req)) return;
     return send(res, 404, 'Not found', { 'Content-Type': 'text/plain' });
   } catch (e) {

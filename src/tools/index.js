@@ -78,7 +78,7 @@ export async function execTool(name, args, ctx) {
       const summary = typeof t.approval === 'function' ? t.approval(args, ctx) : `${name} ${JSON.stringify(args)}`;
       if (summary) {
         const id = await request(name, args, summary, ctx);
-        return { status: 'waiting_for_owner_approval', approval: 'A' + id, note: `Not done yet. Request A${id} is waiting for the owner's YES. Tell him, and do not say it is done.` };
+        return { status: 'waiting_for_owner_approval', approval: 'A' + id, note: `Not done yet: A${id} waits for the owner's YES; he already got the request with its code, so do not repeat it or say it is done.` };
       }
     }
     const res = await t.run(args, ctx);

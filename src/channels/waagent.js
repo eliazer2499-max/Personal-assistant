@@ -340,8 +340,9 @@ export async function moveStatusEmoji(text, wamid, opts = {}) {
     if (s.where === 'only') {
       const r = await taskDone(id);
       if (r) { audit('assistant', 'wa_agent.react_moved', `the reply was only ${e}; the task ✅ went on his message instead`); return { text: null, reacted: r }; }
-      audit('system', 'wa_agent.react_moved', `the reply was only ${e}; sent it as text (the ✅ reaction was not sent)`);
-      return { text, reacted: '' };
+      // 2.3.16: never a bare emoji as its own message in place of a reaction (Abish, Nov 8: a big 👍 bubble)
+      audit('system', 'wa_agent.react_moved', `the reply was only ${e}; not sent (the ✅ reaction was not sent either)`); log('wa agent: emoji-only reply not sent (no reaction possible)');
+      return { text: null, reacted: '' };
     }
     audit('system', 'wa_agent.react_moved', `removed ${e} from the text; the task ✅ goes on his message instead`);
     return { text: s.text, reacted: '' };
@@ -365,8 +366,9 @@ export async function moveStatusEmoji(text, wamid, opts = {}) {
   } else why = mode === 'off' ? 'Reactions are Off' : 'no message of his to react to';
   if (s.where === 'only') {
     if (reacted) { audit('assistant', 'wa_agent.react_moved', `moved ${e} from text to reaction (the reply was only ${e})`); return { text: null, reacted }; }
-    audit('system', 'wa_agent.react_moved', `the reply was only ${e}; sent it as text (${why})`);
-    return { text, reacted: '' };
+    // 2.3.16: never a bare emoji as its own message in place of a reaction (Abish, Nov 8: a big 👍 bubble after his YES)
+    audit('system', 'wa_agent.react_moved', `the reply was only ${e}; not sent (${why})`); log('wa agent: emoji-only reply not sent:', why);
+    return { text: null, reacted: '' };
   }
   audit('system', 'wa_agent.react_moved', `removed ${e} from the text; no reaction (${why})`);
   return { text: s.text, reacted: '' };
@@ -544,10 +546,11 @@ export async function sendOwner(text, opts = {}) {
   if (!to) throw new Error('Send your WhatsApp agent one message first, so I know your chat');
   // 2.3.5: a lone "✅" line typed into the reply becomes a real reaction on his message (or is just dropped).
   const net = await moveStatusEmoji(text, opts.meta?.waa_wamid, { taskDone: !!opts.taskDone });
-  if (net.reacted && net.text === null) return true;           // the whole reply was an emoji: it went as a reaction
+  if (net.text === null && !(opts.files && opts.files.length)) return true;   // the whole reply was an emoji: it went as a reaction (or, 2.3.16, nowhere)
+  if (net.text === null) text = '';
   text = net.text ?? text;
   const quote = String(opts.replyTo?.waa_wamid || '');     // 2.3.15: reply to (quote) that message of his
-  const jobs = splitText(toWhatsApp(text)).map((c, i) => enqueue({ type: 'text', to, text: c, context: i === 0 ? quote : '' }));
+  const jobs = String(text).trim() ? splitText(toWhatsApp(text)).map((c, i) => enqueue({ type: 'text', to, text: c, context: i === 0 ? quote : '' })) : [];
   // 2.3.7: Natural mode, a real request that finished well → ✅ on his message, queued right after the words (not awaited).
   if (opts.taskDone) Promise.resolve(jobs[0]).catch(() => {}).finally(() => taskDone(opts.meta?.waa_wamid));
   for (const f of opts.files || []) {

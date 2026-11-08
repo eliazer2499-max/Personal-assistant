@@ -44,8 +44,8 @@ const str = (v) => (typeof v === 'string' ? v : v === undefined || v === null ? 
  */
 export function parseReplies(text, n) {
   let t = String(text || '').trim();
-  if (!t || !/"replies"|^\s*\[\s*\{/.test(t)) return null;
-  t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  if (!t || !/"replies"|^\s*(?:```\w*\s*)?\[\s*\{/.test(t)) return null;
+  t = unfence(t);
   let obj;
   const a = t.indexOf('{'), z = t.lastIndexOf('}');
   if (/^\s*\[/.test(t)) obj = tryJson(t.slice(t.indexOf('['), t.lastIndexOf(']') + 1));
@@ -97,4 +97,56 @@ export function resolveReplies(items, draft = []) {
 /** The list as the model wrote it (used to show it the draft it is rewriting). */
 export function repliesJson(items) {
   return JSON.stringify({ replies: items.map(i => ({ to: i.to, ...(i.text ? { text: i.text } : {}), ...(i.react ? { react: i.react } : {}) })) });
+}
+
+// ---------------- 2.3.16: the replies JSON never reaches him as text ----------------
+// Abish, Nov 8 2026 (after a publish he got the literal {"replies":[{"to":[3],"text":"Site is live at …"}]}): the
+// model sometimes writes the replies JSON where it is not read as a list — a job resumed after his YES (no messages
+// of his in it), a scheduled job, a fenced ```json block, words before it, or broken JSON. Every final answer
+// now passes through repliesToPlain before it is stored or sent, on every channel.
+
+/** Take off a ```json … ``` fence around the whole answer (or the first fenced block when that is all of the JSON). */
+function unfence(t) {
+  const m = /^```[\w-]*\s*\n?([\s\S]*?)\n?\s*```\s*$/.exec(t);
+  if (m) return m[1].trim();
+  const f = /```(?:json)?\s*\n?(\{[\s\S]*?"replies"[\s\S]*?\}|\[[\s\S]*?\])\s*```/i.exec(t);
+  return f ? f[1].trim() : t;
+}
+const REPLY_KEYS = /"(?:to|text|react|reaction|keep|reply|reply_to|answer)"\s*:/;
+/** Does this answer look like the replies JSON (whole, fenced, wrapped in words, or broken)? */
+export function looksLikeReplies(text) {
+  const t = String(text || '');
+  if (/[{,]\s*"replies"\s*:\s*\[/.test(t)) return true;
+  return /^\s*(?:```[\w-]*\s*)?\[\s*\{/.test(t) && REPLY_KEYS.test(t);
+}
+/** The "text" values found in broken JSON (one per reply), unescaped. */
+function scrapeTexts(t) {
+  const out = [];
+  for (const m of t.matchAll(/"(?:text|reply|answer)"\s*:\s*"((?:[^"\\]|\\[\s\S])*)"?/g)) {
+    let v = m[1];
+    try { v = JSON.parse('"' + v.replace(/\n/g, '\\n').replace(/\r/g, '').replace(/\t/g, '\\t') + '"'); }
+    catch { v = v.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'); }
+    if (v.trim()) out.push(v.trim());
+  }
+  return out;
+}
+/**
+ * An answer as plain words for him. Not the replies JSON → returned exactly as it is.
+ * The replies JSON → its replies' words, one paragraph each (in order, duplicates dropped); words written
+ * around the JSON are kept when the JSON itself has none. Returns { text, reacts, wasJson }.
+ */
+export function repliesToPlain(text) {
+  const t = String(text ?? '');
+  if (!looksLikeReplies(t)) return { text: t, reacts: [], wasJson: false };
+  const parsed = parseReplies(t, 999);
+  let texts = [], reacts = [];
+  if (parsed) { texts = parsed.filter(r => r.text).map(r => r.text); reacts = parsed.filter(r => r.react).map(r => r.react); }
+  else texts = scrapeTexts(t);
+  texts = texts.filter((x, i) => texts.indexOf(x) === i);
+  if (!texts.length) {
+    // words outside the JSON (e.g. "Done! {…}"), else nothing (the caller treats that as no words)
+    const outside = t.replace(/```[\w-]*/g, '').replace(/\{[\s\S]*\}|\[[\s\S]*\]/, '').trim();
+    texts = outside && !/[{}[\]"]/.test(outside) ? [outside] : [];
+  }
+  return { text: texts.join('\n\n'), reacts, wasJson: true };
 }

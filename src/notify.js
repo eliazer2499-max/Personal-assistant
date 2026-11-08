@@ -1,10 +1,16 @@
 // Delivering words to the owner on a channel. Every channel only ever talks to the owner.
 import { run, get, now, setting, log, redact } from './db.js';
 import { chatOfJob, chatById, mainChatId, touchChat } from './chats.js';
+import { looksLikeReplies, repliesToPlain } from './replies.js';
+import { splitStatusEmoji } from './emoji.js';
+
+// 2.3.16: the last guard — the assistant's replies JSON is never stored or sent as text (only its words).
+const plainWords = (role, text) => (role === 'assistant' || role === 'notice') && looksLikeReplies(text) ? repliesToPlain(text).text : text;
 
 /** Store a message. It goes to chatId, else the chat of its job, else the main chat. */
 export function addMessage(role, channel, text, meta = null, jobId = null, chatId = null) {
   const chat = chatId && chatById(chatId) ? Number(chatId) : (jobId ? chatOfJob(jobId) : mainChatId());
+  text = plainWords(role, String(text ?? ''));
   const r = run('INSERT INTO messages(role,channel,text,meta,job_id,ts,chat_id) VALUES(?,?,?,?,?,?,?)', role, channel, redact(String(text)).slice(0, 100000), meta ? JSON.stringify(meta) : null, jobId, now(), chat);
   touchChat(chat);
   return Number(r.lastInsertRowid);
@@ -12,6 +18,13 @@ export function addMessage(role, channel, text, meta = null, jobId = null, chatI
 
 /** Send text to the owner on one channel. opts: { approvalId, meta } */
 export async function deliver(channel, text, opts = {}) {
+  if (!opts.approvalId) {
+    text = plainWords('assistant', String(text ?? ''));
+    if (!text.trim() && !(opts.files && opts.files.length)) return true;
+    // 2.3.16: a bare status emoji is a reaction, never its own message. The WhatsApp Agent turns it into one (or
+    // drops it); the other channels already got their reaction from the brain, so the emoji alone is not sent.
+    if (channel !== 'whatsapp_agent' && channel !== 'web' && !(opts.files && opts.files.length) && splitStatusEmoji(text).where === 'only') { log('deliver: emoji-only text not sent on', channel); return true; }
+  }
   try {
     if (channel === 'telegram') return await (await import('./channels/telegram.js')).sendOwner(text, opts);
     if (channel === 'whatsapp') return await (await import('./channels/whatsapp.js')).sendOwner(text, opts);

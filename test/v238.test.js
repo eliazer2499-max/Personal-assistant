@@ -199,7 +199,9 @@ test('real browser: the whole sign-up — YES first, code from Gmail, password s
   const ap = db.get("SELECT * FROM approvals WHERE tool='browser_signup_submit' ORDER BY id DESC LIMIT 1");
   assert.equal(ap.status, 'pending');
   assert.equal(ap.summary.split('\n')[0], 'Sign up at 127.0.0.1 with abish@example.com?');
-  assert.match(lastReply(), new RegExp('A' + ap.id));
+  // 2.3.16: the approval request is its own message; the reply does not repeat it
+  assert.ok(db.get("SELECT 1 AS x FROM messages WHERE role='approval' AND json_extract(meta,'$.approval')=?", ap.id));
+  assert.doesNotMatch(lastReply(), new RegExp('A' + ap.id + '\\b'));
   const yes = await call(`/api/approvals/${ap.id}`, { yes: true });
   assert.equal(yes.status, 200, yes.text); assert.ok(yes.j.ok, yes.text);
   const user = site.state.users.get('abish@example.com');
