@@ -1158,63 +1158,89 @@ function updateSourceCard(r) {
       return api('/api/settings', { update_repo: '', update_source: v === 'default' ? '' : link.value });
     }, 'Saved. Tap “Check now” to look for an update.').then(x => { if (x) setTimeout(route, 900); }) }, 'Save')), out);
 }
-// 2.3.19: Settings → Main address. Shows the main address and the others this server answers on; Check, then Switch.
+// 2.3.20: Settings → Main address is ONE list of every address this server answers on (Abish, Nov 8 2026: "it should
+// show all urls and allow to select a default"). The default (main) one is marked; every other one has "Make default",
+// which runs the same Check, then asks, then the same Switch as 2.3.19. Typing a new address stays below, as a small extra.
+// The list is built from the whole answer at once (main first, always there), so it never shows only some of them.
+function addressList(r) {
+  const list = Array.isArray(r.addresses) ? r.addresses.filter(a => a && a.host) : [];
+  const main = r.main || (() => { try { return new URL(r.main_url).host; } catch { return ''; } })();
+  if (main && !list.some(a => a.host === main)) list.unshift({ host: main, url: 'https://' + main, default: true });
+  for (const x of r.extras || []) if (x && !list.some(a => a.host === x)) list.push({ host: x, url: 'https://' + x, default: false });
+  return list.map(a => ({ ...a, default: a.host === main })).sort((a, b) => (b.default ? 1 : 0) - (a.default ? 1 : 0));
+}
 async function addressView(body) {
-  const r = await api('/api/address');
-  const out = msgEl(), cout = msgEl();
-  const inp = h('input', { id: 'newaddr', placeholder: 'ai.example.com', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false', inputmode: 'url', 'aria-label': 'New main address' });
-  let checked = null;
-  const swBtn = h('button', { class: 'primary', 'data-addr-switch': '1', disabled: true, onclick: (e) => {
-    if (!checked) return;
-    if (!confirm(`Make https://${checked} the main address?\n\nThe assistant restarts for about a minute. The old address keeps working.`)) return;
-    act(e.target, out, () => api('/api/address/switch', { address: checked, confirm: true }), (x) => { follow(x.to); return x.started === false ? 'Saved (test mode: nothing restarted).' : `Switching to https://${x.to}… this takes about a minute.`; });
-  } }, 'Switch');
-  const setPick = (v) => { inp.value = v; checked = null; swBtn.disabled = true; swBtn.textContent = 'Switch'; say(cout, ''); for (const c of picks.querySelectorAll('[data-addr-pick]')) c.classList.toggle('on', c.dataset.addrPick === v); };
-  const doCheck = (e) => act(e.target, cout, async () => {
-    checked = null; swBtn.disabled = true; swBtn.textContent = 'Switch';
-    const x = await api('/api/address/check', { address: inp.value });
-    if (!x.ok) throw new Error(x.message);
-    checked = x.host; swBtn.disabled = false; swBtn.textContent = `Switch to ${x.host}`;
-    return x;
-  }, (x) => x.message);
-  inp.addEventListener('input', () => { checked = null; swBtn.disabled = true; swBtn.textContent = 'Switch'; });
-  const picks = h('div', { class: 'kmodels' }, r.extras.map(x => h('button', { type: 'button', class: 'chip', 'data-addr-pick': x, onclick: () => setPick(x) }, x)));
+  let r;
+  try { r = await api('/api/address'); }
+  catch (e) {   // e.g. right after an update, while the assistant restarts: say so, and offer to try again (never an empty page)
+    const retry = h('button', { class: 'small', onclick: () => { body.replaceChildren(); addressView(body); } }, 'Try again');
+    body.replaceChildren(h('div', { class: 'card', id: 'addrerr' }, h('h3', {}, 'Main address'), h('p', { class: 'msg err' }, 'Couldn\'t load your addresses: ' + e.message), retry));
+    return;
+  }
+  const out = msgEl();
   const resBox = h('div', {});
+  let busy = false;
+  // Make default = Check → confirm → Switch (the same server-side check and switch as before; nothing changes if the check fails)
+  const makeDefault = async (btn, msg, value) => {
+    if (busy) return; busy = true;
+    const label = btn.textContent; btn.disabled = true; btn.textContent = 'Checking…'; say(msg, 'Checking…', true);
+    try {
+      const x = await api('/api/address/check', { address: value });
+      if (!x.ok) { say(msg, x.message, false); return; }
+      say(msg, x.message, true);
+      if (!confirm(`Make https://${x.host} the default address?\n\nThe assistant restarts for about a minute. The old address keeps working, and you sign in once on the new one.`)) { say(msg, 'Nothing was changed.', true); return; }
+      btn.textContent = 'Switching…';
+      const s = await api('/api/address/switch', { address: x.host, confirm: true });
+      say(msg, s.started === false ? 'Saved (test mode: nothing restarted).' : `Switching to https://${s.to}… this takes about a minute.`, true);
+      showResult({ pending: { to: s.to } }); follow(s.to);
+    } catch (e) { say(msg, e.message, false); }
+    finally { busy = false; btn.disabled = false; btn.textContent = label; }
+  };
+  const rows = h('div', { class: 'list addrrows', role: 'radiogroup', 'aria-label': 'Your addresses' });
+  const drawList = (x) => {
+    rows.replaceChildren(...addressList(x).map(a => {
+      const msg = h('p', { class: 'msg' });
+      const btn = a.default ? null : h('button', { class: 'small', type: 'button', 'data-addr-make': a.host, onclick: (e) => makeDefault(e.currentTarget, msg, a.host) }, 'Make default');
+      return h('div', { class: 'item addrrow' + (a.default ? ' on' : ''), role: 'radio', 'aria-checked': String(a.default), 'data-addr-row': a.host, 'data-addr-default': a.default ? '1' : null },
+        h('span', { class: 'addrdot', 'aria-hidden': 'true' }),
+        h('div', { class: 'addrtext' }, h('span', { class: 'addrhost' }, a.url),
+          a.default ? h('span', { class: 'sub' }, h('span', { class: 'pill ok', 'data-addr-badge': '1' }, 'Default'), ' Used in the links your assistant sends') : null, msg),
+        btn);
+    }));
+  };
   const showResult = (x) => {
     resBox.replaceChildren();
     if (x.pending) resBox.append(h('p', { class: 'stat no', 'data-addr-pending': '1' }, `Switching to https://${x.pending.to}… (about a minute)`));
     else if (x.result) resBox.append(h('p', { class: 'stat ' + (x.result.state === 'ok' ? 'ok' : 'no'), 'data-addr-result': x.result.state }, x.result.message),
       x.result.state === 'ok' && x.result.main && x.result.main !== location.hostname ? h('button', { class: 'primary', 'data-addr-open': '1', onclick: () => { location.href = 'https://' + x.result.main + '/'; } }, 'Open https://' + x.result.main) : null);
   };
-  showResult(r);
-  // after Switch: the assistant restarts; ask again every few seconds until the result is in
+  // after a switch: the assistant restarts; ask again every few seconds until the result is in, then redraw the list
   const follow = (to) => {
     let n = 0;
     const tick = async () => {
       n++;
-      try { const x = await api('/api/address'); if (!x.pending && x.result && (x.result.main === to || x.result.state !== 'ok')) { showResult(x); say(out, ''); return; } showResult(x); } catch {}
+      try { const x = await api('/api/address'); showResult(x); if (!x.pending && x.result && (x.result.main === to || x.result.state !== 'ok')) { drawList(x); say(out, ''); return; } } catch {}
       if (n < 60) setTimeout(tick, 5000);
     };
     setTimeout(tick, 4000);
   };
+  drawList(r); showResult(r);
   if (r.pending) follow(r.pending.to);
-  body.append(
-    h('div', { class: 'card', id: 'addrnow' }, h('h3', {}, 'Main address'),
-      h('p', { class: 'addrmain', 'data-addr-main': r.main }, h('b', {}, r.main_url)),
-      h('p', { class: 'fine' }, 'Links your assistant sends (sites, files, sign-in pages, webhooks) use the main address.'),
-      r.extras.length ? h('div', {}, h('p', { class: 'fine' }, 'It also answers on:'), h('ul', { class: 'fine addrlist' }, r.extras.map(x => h('li', { 'data-addr-extra': x }, 'https://' + x)))) : h('p', { class: 'fine' }, 'No other addresses yet.'),
-      resBox),
-    h('div', { class: 'card', id: 'addrchange' }, h('h3', {}, 'Change the main address'),
-      r.extras.length ? h('p', { class: 'fine' }, 'Pick one of your other addresses, or type a new one.') : h('p', { class: 'fine' }, 'Type the new address.'),
-      picks,
-      h('label', { for: 'newaddr' }, 'New main address'), inp,
+  const inp = h('input', { id: 'newaddr', placeholder: 'ai.example.com', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false', inputmode: 'url', 'aria-label': 'Another address' });
+  const addBtn = h('button', { class: 'small', type: 'button', 'data-addr-add': '1', onclick: (e) => makeDefault(e.currentTarget, out, inp.value) }, 'Make default');
+  body.append(...[
+    h('div', { class: 'card', id: 'addrnow' }, h('h3', {}, 'Your addresses'),
+      h('p', { class: 'fine' }, 'Your assistant opens on all of these. The default one is used in the links it sends (sites, files, sign-in pages, webhooks).'),
+      rows, resBox,
+      h('p', { class: 'fine' }, 'Make default checks first that the address points to this server and opens this same assistant. If it doesn\'t, nothing changes. The old address keeps working, and you sign in once on the new one.')),
+    h('details', { class: 'card addradd', id: 'addrchange' }, h('summary', { class: 'fine' }, 'Add another address'),
+      h('label', { for: 'newaddr' }, 'Address'), inp,
       h('p', { class: 'fine' }, 'A new address must point to this server first (an A record where you bought the domain).'),
-      h('div', { class: 'row' }, h('button', { 'data-addr-check': '1', onclick: doCheck }, 'Check'), swBtn), cout, out,
-      h('p', { class: 'fine' }, 'Check makes sure the address points to this server and opens this same assistant. If it doesn\'t, nothing changes. After the switch, the old address keeps working, and you sign in once on the new one.')),
+      h('div', { class: 'row' }, addBtn), out),
     r.notes.length || r.telegram ? h('div', { class: 'card', id: 'addrnotes' }, h('h3', {}, 'Good to know'),
       h('ul', { class: 'fine' },
         r.telegram ? h('li', { 'data-addr-note': 'telegram' }, 'Telegram moves to the new address by itself after the switch.') : null,
-        r.notes.map(n => h('li', { 'data-addr-note': n.id }, n.text)))) : null);
+        r.notes.map(n => h('li', { 'data-addr-note': n.id }, n.text)))) : null].filter(Boolean));
 }
 
 async function updatesView(body) {

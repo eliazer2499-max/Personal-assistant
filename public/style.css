@@ -394,3 +394,11 @@ a.siteopen{display:inline-flex;align-items:center;min-height:36px;padding:6px 12
 /* 2.3.19: Settings → Main address */
 .addrmain{margin:4px 0 8px;font-size:17px;word-break:break-all}
 .addrlist{margin:4px 0 8px;padding-left:18px;word-break:break-all}
+/* 2.3.20: Main address = one list, the default marked */
+.addrrows{margin:6px 0 10px}
+.list .item.addrrow{justify-content:flex-start;padding:12px}
+.addrdot{flex:none;width:18px;height:18px;border-radius:50%;border:2px solid var(--line);box-sizing:border-box}
+.addrrow.on .addrdot{border-color:var(--accent);background:radial-gradient(circle,var(--accent) 0 4px,transparent 5px)}
+.addrtext{flex:1;min-width:0}.addrhost{display:block;overflow-wrap:anywhere;font-size:15px}.addrrow.on .addrhost{font-weight:600}
+.addrtext .msg:empty{display:none}.addrrow button{flex:none}.addrtext .pill{margin-right:4px}
+details.addradd summary{cursor:pointer;margin:0}

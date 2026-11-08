@@ -166,10 +166,20 @@ export function addressInfo() {
   const notes = [];
   if (setting('google_client_id')) notes.push({ id: 'google', text: 'Google sign-in: after the switch, add the new return address (shown in Settings → Google accounts) to "Authorized redirect URIs" in your Google console, or adding a Google account will fail. Accounts you already added keep working.' });
   if (setting('wa_phone_number_id') && !(setting('wa_app_id') && secret('wa_app_secret'))) notes.push({ id: 'whatsapp', text: 'WhatsApp business number: its webhook keeps using the old address (which keeps working). To move it, paste the new webhook address from Settings → Channels into your WhatsApp app settings.' });
+  const extras = extraHosts();
   return {
-    main, main_url: cfg.publicUrl, extras: extraHosts(), pending, result,
+    main, main_url: cfg.publicUrl, extras, addresses: allAddresses(main, extras), pending, result,
     telegram: !!secret('telegram_token'), notes,
   };
+}
+/** 2.3.20: ONE list of every address this server answers on — the main (default) one first, then every extra one.
+ *  The main one is always in it, even when it is not a plain name (an IP address), so the list is never empty. */
+export function allAddresses(main = mainHost(), extras = extraHosts()) {
+  const out = [], seen = new Set();
+  const add = (h, isMain) => { if (h && !seen.has(h)) { seen.add(h); out.push({ host: h, url: 'https://' + h, default: isMain }); } };
+  add(main || (() => { try { return new URL(cfg.publicUrl).host.toLowerCase(); } catch { return ''; } })(), true);
+  for (const h of extras) add(h, false);
+  return out;
 }
 export function readResult() {
   let t = ''; try { t = fs.readFileSync(RESULT_FILE(), 'utf8'); } catch { return null; }
